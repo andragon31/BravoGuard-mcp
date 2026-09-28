@@ -13,6 +13,14 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   betterleaks stdin/path, `scan_repo` path validation (traversal rejected), minimal
   normalization to `FINDING_KEYS`, secrets never propagated into findings or errors.
   `server.py` delegates to it; `_run_with_timeout` placeholder removed.
+- T2 Normalizer (`src/bravoguard/normalizer.py`, single source for `FINDING_KEYS`):
+  extended schema with `epss, kev, reachability_note` (10 keys),
+  one parser per scanner (semgrep/opengrep JSON, bandit JSON, betterleaks JSON
+  with Secret/Match redaction and CWE-798 default), dedup on
+  `rule_id+path+line+message hash` (first wins), risk sort
+  (KEV first, then EPSS desc). `orchestrator.py` re-exports the
+  parsers and applies dedup plus sort in `_collect`; `server.py` re-exports
+  `FINDING_KEYS` from the normalizer.
 
 ## [0.1.0] — skeleton
 - FastMCP 4 + MCP SDK 2 stdio server with 5 stub tools.

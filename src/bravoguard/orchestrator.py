@@ -1,4 +1,4 @@
-"""Subprocess orchestration for BRAVOGuard scanners (Phase 1, T1).
+"""Subprocess orchestration for BRAVOGuard scanners (Phase 1, T2).
 
 Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
 
@@ -23,6 +23,14 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from bravoguard.normalizer import (
+    FINDING_KEYS,
+    normalize_bandit,
+    normalize_betterleaks,
+    normalize_findings,
+    normalize_semgrep,
+)
+
 DIFF_TIMEOUT_SECONDS = 60
 DEFAULT_TIMEOUT_SECONDS = 120
 
@@ -32,10 +40,17 @@ OPENGREP_FALLBACK = "opengrep"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
 
-# Unified finding schema (Phase 1 target; T2 extends it with epss/kev data).
-FINDING_KEYS = ("rule_id", "cwe", "path", "line", "severity", "message", "fix_hint")
-
-_BETTERLEAKS_FIX_HINT = "Remove the secret, rotate it, and load it from env or a secret manager."
+__all__ = [
+    "DEFAULT_TIMEOUT_SECONDS",
+    "DIFF_TIMEOUT_SECONDS",
+    "FINDING_KEYS",
+    "OPENGREP_FALLBACK",
+    "SEMGREP_ENGINE",
+    "normalize_bandit",
+    "normalize_betterleaks",
+    "normalize_findings",
+    "normalize_semgrep",
+]
 
 
 class OrchestratorError(Exception):
@@ -158,123 +173,6 @@ def resolve_scan_path(raw_path: str, allowed_root: Path | None = None) -> Path:
 
 def _inside_root(resolved: Path, root: Path) -> bool:
     return resolved == root or resolved.is_relative_to(root)
-
-
-def _finding(
-    rule_id: Any,
-    cwe: Any,
-    path: Any,
-    line: Any,
-    severity: Any,
-    message: Any,
-    fix_hint: Any,
-) -> dict[str, Any]:
-    return {
-        "rule_id": str(rule_id or "unknown"),
-        "cwe": str(cwe or ""),
-        "path": str(path or ""),
-        "line": _safe_line(line),
-        "severity": str(severity or "MEDIUM").upper(),
-        "message": str(message or ""),
-        "fix_hint": str(fix_hint or ""),
-    }
-
-
-def _safe_line(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def normalize_semgrep(payload: Any) -> list[dict[str, Any]]:
-    """Map semgrep/opengrep JSON results to the unified finding shape."""
-    results = payload.get("results", []) if isinstance(payload, dict) else []
-    findings = []
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
-        metadata = extra.get("metadata") if isinstance(extra.get("metadata"), dict) else {}
-        start = item.get("start") if isinstance(item.get("start"), dict) else {}
-        cwe = metadata.get("cwe", "")
-        if isinstance(cwe, list):
-            cwe = cwe[0] if cwe else ""
-        findings.append(
-            _finding(
-                item.get("check_id"),
-                cwe,
-                item.get("path"),
-                start.get("line"),
-                extra.get("severity"),
-                extra.get("message"),
-                metadata.get("fix_hint"),
-            )
-        )
-    return findings
-
-
-def _bandit_cwe(value: Any) -> str:
-    if isinstance(value, dict):
-        value = value.get("id", "")
-    if isinstance(value, int):
-        return f"CWE-{value}"
-    text = str(value or "").strip()
-    if text.isdigit():
-        return f"CWE-{text}"
-    return text.upper() if text.upper().startswith("CWE-") else text
-
-
-def normalize_bandit(payload: Any) -> list[dict[str, Any]]:
-    """Map bandit JSON results to the unified finding shape."""
-    results = payload.get("results", []) if isinstance(payload, dict) else []
-    findings = []
-    for item in results:
-        if not isinstance(item, dict):
-            continue
-        findings.append(
-            _finding(
-                item.get("test_id"),
-                _bandit_cwe(item.get("issue_cwe")),
-                item.get("filename"),
-                item.get("line_number"),
-                item.get("issue_severity"),
-                item.get("issue_text"),
-                "",
-            )
-        )
-    return findings
-
-
-def normalize_betterleaks(payload: Any) -> list[dict[str, Any]]:
-    """Map betterleaks JSON to the unified finding shape.
-
-    Only rule metadata is propagated; Secret/Match values are dropped so
-    live credentials never flow into findings, logs, or errors.
-    """
-    if isinstance(payload, list):
-        items = payload
-    elif isinstance(payload, dict):
-        results = payload.get("results", [])
-        items = results if isinstance(results, list) else []
-    else:
-        items = []
-    findings = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        findings.append(
-            _finding(
-                item.get("RuleID"),
-                "CWE-798",
-                item.get("File"),
-                item.get("StartLine"),
-                "HIGH",
-                item.get("Description"),
-                _BETTERLEAKS_FIX_HINT,
-            )
-        )
-    return findings
 
 
 def _diff_target(line: str) -> str | None:
@@ -400,7 +298,7 @@ async def _collect(jobs: list[tuple[str, Any]]) -> dict[str, Any]:
             continue
         _, payload = result
         findings.extend(_NORMALIZERS[label](payload))
-    response: dict[str, Any] = {"status": "ok", "findings": findings}
+    response: dict[str, Any] = {"status": "ok", "findings": normalize_findings(findings)}
     if errors:
         response["errors"] = errors
     return response

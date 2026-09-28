@@ -19,10 +19,11 @@ import asyncio
 from fastmcp import FastMCP
 
 from bravoguard import orchestrator
+from bravoguard.normalizer import FINDING_KEYS
 from bravoguard.orchestrator import DEFAULT_TIMEOUT_SECONDS, DIFF_TIMEOUT_SECONDS
 
-# Re-exported for backwards compatibility (single source: orchestrator).
-FINDING_KEYS = orchestrator.FINDING_KEYS
+# Re-exported for backwards compatibility (single source: normalizer).
+assert orchestrator.FINDING_KEYS == FINDING_KEYS
 SEMGREP_ENGINE = orchestrator.SEMGREP_ENGINE
 OPENGREP_FALLBACK = orchestrator.OPENGREP_FALLBACK
 
