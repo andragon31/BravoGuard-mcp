@@ -37,6 +37,14 @@ API_KEY_SUGGESTION = (
     'Example: api_key = os.environ["API_KEY"]'
 )
 
+SUBPROCESS_SUGGESTION = (
+    "Avoid shell=True, os.system(), and string commands with untrusted input "
+    "(CWE-78). Pass an argv list with shell=False and validate any dynamic "
+    "argument against an explicit allowlist. "
+    'Example: subprocess.run(["git", "show", safe_ref], shell=False)  '
+    "# quote with shlex.quote() only when a shell string is unavoidable"
+)
+
 EVAL_RULES = frozenset({"bravoguard-python-eval", "bravoguard-python-eval-exec", "b307"})
 PICKLE_RULES = frozenset({"bravoguard-python-pickle-load", "b301"})
 INNERHTML_RULES = frozenset(
@@ -48,6 +56,17 @@ INNERHTML_RULES = frozenset(
     }
 )
 API_KEY_RULES = frozenset({"generic-api-key"})
+SUBPROCESS_RULES = frozenset(
+    {
+        "b603",
+        "b604",
+        "b605",
+        "b606",
+        "b607",
+        "bravoguard-python-subprocess-shell",
+        "bravoguard-python-os-system",
+    }
+)
 
 _RULE_TEMPLATES: dict[str, str] = {
     rule: EVAL_SUGGESTION for rule in EVAL_RULES
@@ -57,6 +76,8 @@ _RULE_TEMPLATES: dict[str, str] = {
     rule: INNERHTML_SUGGESTION for rule in INNERHTML_RULES
 } | {
     rule: API_KEY_SUGGESTION for rule in API_KEY_RULES
+} | {
+    rule: SUBPROCESS_SUGGESTION for rule in SUBPROCESS_RULES
 }
 
 _CWE_TEMPLATES = {
@@ -64,6 +85,7 @@ _CWE_TEMPLATES = {
     "CWE-502": PICKLE_SUGGESTION,
     "CWE-79": INNERHTML_SUGGESTION,
     "CWE-798": API_KEY_SUGGESTION,
+    "CWE-78": SUBPROCESS_SUGGESTION,
 }
 
 

@@ -229,3 +229,56 @@ def test_server_delegates_to_orchestrator() -> None:
     assert "_run_with_timeout" not in source
     assert "orchestrator.scan_diff" in source
     assert "orchestrator.scan_repo" in source
+
+
+def test_missing_betterleaks_recorded_without_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list = []
+    responses = quiet_responses()
+    del responses["betterleaks"]
+    install_fake(monkeypatch, responses, calls)
+    result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
+    assert result["status"] == "ok"
+    assert result["errors"]["betterleaks"] == "not-installed"
+
+
+def test_all_scanners_missing_stays_ok_with_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list = []
+    install_fake(monkeypatch, {}, calls)
+    result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
+    assert result["status"] == "ok"
+    assert result["findings"] == []
+    assert set(result["errors"]) == {"sast", "bandit", "betterleaks"}
+    assert all(reason == "not-installed" for reason in result["errors"].values())
+
+
+def test_scanner_argv_match_manifest_pins() -> None:
+    from bravoguard.osv import osv_scanner_argv, pip_audit_argv
+
+    assert osv_scanner_argv("pkg", "1.0") == [
+        "osv-scanner",
+        "--package",
+        "pkg",
+        "--version",
+        "1.0",
+        "--format",
+        "json",
+    ]
+    assert pip_audit_argv("req.txt") == ["pip-audit", "-r", "req.txt", "--format=json"]
+    assert orchestrator.betterleaks_stdin_argv() == [
+        "betterleaks",
+        "detect",
+        "--no-git",
+        "--source",
+        "-",
+    ]
+    assert orchestrator.betterleaks_path_argv("repo") == [
+        "betterleaks",
+        "detect",
+        "--no-git",
+        "--source",
+        "repo",
+    ]

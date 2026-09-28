@@ -42,7 +42,7 @@ __all__ = [
 
 
 def osv_scanner_argv(package: str, version: str) -> list[str]:
-    """Single-package OSV query as JSON."""
+    """Single-package OSV query as JSON (osv-scanner V2 pin, tools-manifest.json)."""
     return [OSV_SCANNER_BIN, "--package", package, "--version", version, "--format", "json"]
 
 

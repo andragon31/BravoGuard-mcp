@@ -42,34 +42,54 @@ def _scan_cache() -> FindingCache:
 
 
 @mcp.tool()
-async def scan_diff(diff: str, cache_ttl: float | None = None) -> dict:
+async def scan_diff(
+    diff: str,
+    cache_ttl: float | None = None,
+    exclude: list[str] | None = None,
+) -> dict:
     """Scan an inline unified diff for high-signal issues.
 
     Fans out to `semgrep --config rules/ --json` (or opengrep fallback) +
     bandit + betterleaks stdin via the orchestrator, normalized to FINDING_KEYS.
-    Cache-first (SQLite write-through); empty diffs bypass the cache.
+    Cache-first (SQLite write-through); empty diffs and fully-degraded results
+    bypass the cache. `exclude` overrides the default media/binary skip list.
     """
     if not diff.strip():
         return {"status": "empty-diff", "findings": []}
     return await asyncio.wait_for(
-        orchestrator.scan_diff(diff, timeout=DIFF_TIMEOUT_SECONDS, cache=_scan_cache(), cache_ttl=cache_ttl),
+        orchestrator.scan_diff(
+            diff,
+            timeout=DIFF_TIMEOUT_SECONDS,
+            cache=_scan_cache(),
+            cache_ttl=cache_ttl,
+            exclude=exclude,
+        ),
         timeout=DIFF_TIMEOUT_SECONDS,
     )
 
 
 @mcp.tool()
-async def scan_repo(path: str, timeout: int = DEFAULT_TIMEOUT_SECONDS, cache_ttl: float | None = None) -> dict:
+async def scan_repo(
+    path: str,
+    timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    cache_ttl: float | None = None,
+    exclude: list[str] | None = None,
+) -> dict:
     """Scan a local repository checkout and return unified findings.
 
     Orchestrates semgrep/opengrep + bandit + betterleaks with path validation
     and per-scanner timeouts, normalized to one schema. Cache-first (SQLite
-    write-through keyed on directory content digest); guard statuses bypass it.
+    write-through keyed on directory content digest); guard statuses and
+    fully-degraded results bypass it. `exclude` overrides the default
+    media/binary skip list.
     """
     if not path.strip():
         return {"status": "empty-path", "findings": []}
     budget = timeout if isinstance(timeout, (int, float)) and timeout > 0 else DEFAULT_TIMEOUT_SECONDS
     return await asyncio.wait_for(
-        orchestrator.scan_repo(path, timeout=budget, cache=_scan_cache(), cache_ttl=cache_ttl),
+        orchestrator.scan_repo(
+            path, timeout=budget, cache=_scan_cache(), cache_ttl=cache_ttl, exclude=exclude
+        ),
         timeout=budget,
     )
 

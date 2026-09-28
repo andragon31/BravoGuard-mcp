@@ -79,6 +79,26 @@ def test_empty_finding_guard() -> None:
     }
 
 
+@pytest.mark.parametrize("rule_id", ["B603", "B604", "B605", "B606", "B607"])
+def test_subprocess_bandit_rules_use_argv_template(rule_id: str) -> None:
+    result = suggest_for_finding(_finding(rule_id, "CWE-78"))
+    assert "shell=False" in result["suggestion"]
+    assert "shlex.quote" in result["suggestion"]
+    assert result["cwe"] == "CWE-78"
+    assert result["owasp_ref"] == "A05"
+
+
+def test_cwe78_fallback_when_rule_unknown() -> None:
+    result = suggest_for_finding(_finding("some-new-shell-rule", "CWE-78"))
+    assert "shell=False" in result["suggestion"]
+    assert "No rule-specific template" not in result["suggestion"]
+
+
+def test_bravoguard_subprocess_equivalent() -> None:
+    result = suggest_for_finding(_finding("bravoguard-python-subprocess-shell", "CWE-78"))
+    assert "shell=False" in result["suggestion"]
+
+
 def test_server_suggest_fix_wired_to_templates() -> None:
     import bravoguard.server as server
 

@@ -49,6 +49,34 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   `{suggestion, rule_id, cwe, owasp_ref}` (`status: ok`, empty-finding guard
   preserved). No LLM calls.
 
+## [V3] — venv-proof gap fixes
+
+### Added
+- `exclude` param on `scan_repo`/`scan_diff` (orchestrator + server
+  passthrough): list of dir/file globs, defaults to `DEFAULT_EXCLUDES`
+  (`frames/`, `projects/`, `*.wav`, `*.zip`, media/binary extensions).
+  `_dir_fingerprint` and `materialize_diff_files` respect it (`.git` always
+  excluded); the normalized list joins the cache key so media churn keeps
+  cache hits. Tests in `tests/test_exclude.py`.
+- Subprocess argv template in `suggest.py`: B603-B607 plus bravoguard
+  equivalents map to a `shell=False` + allowlist + `shlex.quote` template,
+  with a CWE-78 fallback (OWASP A05). Tests in `tests/test_suggest.py`.
+
+### Fixed
+- Fully-degraded scans (every scanner `not-installed`, 0 findings) are no
+  longer cached, so the next call re-probes instead of replaying the miss.
+- Cache hits now return stored `errors` alongside findings (SQLite payloads
+  are `{findings, errors}` envelopes; legacy list payloads still read back).
+- `cli.py` ruff clean: dropped unused `sys` import, fixed 2 placeholder-less
+  f-strings.
+
+### Verified
+- `betterleaks`/`osv-scanner` argv reviewed against `tools-manifest.json`
+  pins (gitleaks v8-style `detect --no-git --source`, osv-scanner V2
+  `--package/--version/--format json`); missing binaries surface as
+  `not-installed` errors (scans) or `unavailable` (osv_lookup), never a
+  crash. Units with fakes in `tests/test_orchestrator.py`/`tests/test_osv.py`.
+
 ## [0.1.0] — skeleton
 - FastMCP 4 + MCP SDK 2 stdio server with 5 stub tools.
 - Corrected OWASP 2025 mapping (A05 injection) + versioned `owasp_2025.json` / `llm_2026.json`.

@@ -16,7 +16,6 @@ import json
 import platform
 import shutil
 import sqlite3
-import sys
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,7 +63,7 @@ def cmd_version(check: bool = False) -> int:
     print(f"python {platform.python_version()} ({platform.system()} {platform.machine()})")
     print(f"fastmcp {dist('fastmcp')} / mcp {dist('mcp')}")
     print(f"rules: {RULES_DIR} ({len(list(RULES_DIR.rglob('*.yaml')))} yaml)")
-    print(f"tables: owasp_2025.json + llm_2026.json")
+    print("tables: owasp_2025.json + llm_2026.json")
     if check:
         latest = fetch_latest_release()
         if latest:
@@ -123,7 +122,7 @@ def cmd_doctor(strict: bool = False) -> int:
         tools = asyncio.run(_names())
         expected = {"scan_diff", "scan_repo", "osv_lookup", "owasp_explain", "suggest_fix"}
         if tools == expected:
-            print(f"[ok] server exposes 5 tools")
+            print("[ok] server exposes 5 tools")
         else:
             failures.append(f"tools mismatch: {sorted(tools)}")
             print(f"[fail] tools mismatch: {sorted(tools)}")

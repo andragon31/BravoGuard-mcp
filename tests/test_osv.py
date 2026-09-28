@@ -221,3 +221,16 @@ def test_osv_lookup_empty_guard_skips_fetcher() -> None:
         "status": "empty-package",
         "vulns": [],
     }
+
+
+def test_fetch_osv_both_missing_raises_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bravoguard.orchestrator import ScannerMissingError
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        raise FileNotFoundError(str(argv[0]))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    with pytest.raises(ScannerMissingError):
+        asyncio.run(fetch_osv("django", "4.2"))

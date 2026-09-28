@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import hashlib
 import json
 import tempfile
@@ -43,7 +44,34 @@ OPENGREP_FALLBACK = "opengrep"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
 
+# Default scan exclusions: media/binary dirs and extensions skipped by the
+# fingerprint and the diff materializer (real-project scans exclude them so
+# media churn never invalidates the cache). `.git` is always excluded.
+DEFAULT_EXCLUDES: tuple[str, ...] = (
+    "frames/",
+    "projects/",
+    "*.wav",
+    "*.zip",
+    "*.mp4",
+    "*.mp3",
+    "*.avi",
+    "*.mov",
+    "*.mkv",
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.bmp",
+    "*.ico",
+    "*.pdf",
+    "*.bin",
+    "*.exe",
+    "*.dll",
+    "*.so",
+)
+
 __all__ = [
+    "DEFAULT_EXCLUDES",
     "DEFAULT_TIMEOUT_SECONDS",
     "DIFF_TIMEOUT_SECONDS",
     "FINDING_KEYS",
@@ -96,12 +124,17 @@ def bandit_argv(target: str) -> list[str]:
 
 
 def betterleaks_stdin_argv() -> list[str]:
-    """Secrets edge scan reading a diff from stdin (Gitleaks v8-style flags)."""
+    """Secrets edge scan reading a diff from stdin.
+
+    Gitleaks v8-style flags (``detect --no-git --source``); betterleaks is
+    pinned as gitleaks-compatible in tools-manifest.json (fallback gitleaks
+    v8.28). Missing binary raises ScannerMissingError, never crashes.
+    """
     return ["betterleaks", "detect", "--no-git", "--source", "-"]
 
 
 def betterleaks_path_argv(target: str) -> list[str]:
-    """Secrets scan of a repo checkout path."""
+    """Secrets scan of a repo checkout path (same pin, see above)."""
     return ["betterleaks", "detect", "--no-git", "--source", target]
 
 
@@ -208,13 +241,17 @@ def _unique_filename(name: str, used: set[str]) -> str:
     return final
 
 
-def materialize_diff_files(diff: str, workdir: Path) -> list[Path]:
+def materialize_diff_files(
+    diff: str, workdir: Path, exclude: list[str] | tuple[str, ...] | None = None
+) -> list[Path]:
     """Write added diff lines per +++ header into workdir; return files.
 
     Header-less added lines fall back to ``snippet.py`` so bare pastes still
     scan. Suffixes come from the diff headers (default ``.py``) so the SAST
-    engines pick the right language rules.
+    engines pick the right language rules. Files matching ``exclude``
+    (default :data:`DEFAULT_EXCLUDES`) are skipped.
     """
+    excludes = _normalize_excludes(exclude)
     buffers: dict[str, list[str]] = {}
     order: list[str] = []
     current: str | None = None
@@ -240,6 +277,8 @@ def materialize_diff_files(diff: str, workdir: Path) -> list[Path]:
     written = []
     used: set[str] = set()
     for name in order:
+        if _is_excluded(name, excludes):
+            continue
         target = workdir / _unique_filename(name, used)
         target.write_text("\n".join(buffers[name]) + "\n", encoding="utf-8")
         written.append(target)
@@ -290,19 +329,45 @@ def _error_reason(exc: BaseException) -> str:
     return "failed"
 
 
-def _dir_fingerprint(target: Path) -> str:
+def _normalize_excludes(exclude: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    if exclude is None:
+        return DEFAULT_EXCLUDES
+    return tuple(e for e in exclude if e)
+
+
+def _is_excluded(rel_posix: str, patterns: tuple[str, ...]) -> bool:
+    for pattern in patterns:
+        if pattern.endswith("/"):
+            prefix = pattern.rstrip("/")
+            if rel_posix == prefix or rel_posix.startswith(pattern):
+                return True
+        elif fnmatch.fnmatch(rel_posix, pattern) or fnmatch.fnmatch(
+            Path(rel_posix).name, pattern
+        ):
+            return True
+    return False
+
+
+def _dir_fingerprint(
+    target: Path, exclude: list[str] | tuple[str, ...] | None = None
+) -> str:
     """Best-effort content digest of a repo dir (relpath + size + mtime)."""
+    excludes = _normalize_excludes(exclude)
     digest = hashlib.sha256()
     try:
         files = sorted(
-            p for p in target.rglob("*") if p.is_file() and ".git" not in p.parts
+            p
+            for p in target.rglob("*")
+            if p.is_file() and ".git" not in p.parts
         )
     except OSError:
         return target.name
     for path in files[:5000]:
         try:
-            stat = path.stat()
             rel = path.relative_to(target).as_posix()
+            if _is_excluded(rel, excludes):
+                continue
+            stat = path.stat()
             digest.update(f"{rel}|{stat.st_size}|{stat.st_mtime_ns}\n".encode("utf-8"))
         except OSError:
             continue
@@ -318,16 +383,41 @@ def _lookup_scan_cache(cache: FindingCache | None, key: str) -> dict[str, Any] |
         return None
     if cached is None:
         return None
-    return {"status": "ok", "findings": cached, "cached": True}
+    if isinstance(cached, dict):  # envelope: findings + errors
+        response: dict[str, Any] = {
+            "status": "ok",
+            "findings": cached.get("findings", []),
+            "cached": True,
+        }
+        if cached.get("errors"):
+            response["errors"] = cached["errors"]
+        return response
+    return {"status": "ok", "findings": cached, "cached": True}  # legacy list payload
+
+
+def _is_fully_degraded(result: dict[str, Any], total_scanners: int) -> bool:
+    """True when every scanner is missing and nothing was found (skip cache)."""
+    errors = result.get("errors")
+    return (
+        not result.get("findings")
+        and isinstance(errors, dict)
+        and total_scanners > 0
+        and len(errors) == total_scanners
+        and all(reason == "not-installed" for reason in errors.values())
+    )
 
 
 def _store_scan_cache(
-    cache: FindingCache | None, key: str, findings: Any, cache_ttl: float | None
+    cache: FindingCache | None,
+    key: str,
+    findings: Any,
+    cache_ttl: float | None,
+    errors: dict[str, str] | None = None,
 ) -> None:
     if cache is None or not isinstance(findings, list):
         return
     with contextlib.suppress(Exception):
-        cache.put(key, findings, ttl_seconds=cache_ttl)
+        cache.put(key, {"findings": findings, "errors": errors or {}}, ttl_seconds=cache_ttl)
 
 
 async def _collect(jobs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -353,34 +443,42 @@ async def scan_diff(
     *,
     cache: FindingCache | None = None,
     cache_ttl: float | None = None,
+    exclude: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Scan added lines of a unified diff with SAST + bandit + secrets.
 
     Per-scanner ``asyncio.wait_for`` budgets apply (default DIFF 60s); a
     failing scanner is recorded under ``errors`` without failing the scan.
     Cache-first when ``cache`` is given: hits skip the fan-out and return
-    ``cached: True``; misses write normalized findings through. Empty diffs
-    are never cached.
+    ``cached: True`` (with stored ``errors`` when present); misses write
+    normalized findings through. Empty diffs are never cached, and neither
+    are fully-degraded results (all scanners not-installed). Files matching
+    ``exclude`` (default :data:`DEFAULT_EXCLUDES`) are never materialized.
     """
     if not diff or not diff.strip():
         return {"status": "empty-diff", "findings": []}
     key = ""
+    excludes = _normalize_excludes(exclude)
     if cache is not None:
-        key = make_scan_key(diff, scanner_versions=scanner_fingerprint())
+        key = make_scan_key(
+            f"{diff}\x00exclude:{','.join(sorted(excludes))}",
+            scanner_versions=scanner_fingerprint(),
+        )
         hit = _lookup_scan_cache(cache, key)
         if hit is not None:
             return hit
     budget = timeout if timeout and timeout > 0 else DIFF_TIMEOUT_SECONDS
     with tempfile.TemporaryDirectory(prefix="bravoguard-diff-") as tmp:
         workdir = Path(tmp)
-        materialize_diff_files(diff, workdir)
+        materialize_diff_files(diff, workdir, excludes)
         jobs = [
             ("sast", _scan_sast(str(workdir), budget)),
             ("bandit", _run_bandit(str(workdir), budget)),
             ("betterleaks", _run_betterleaks_stdin(diff.encode("utf-8"), budget)),
         ]
         result = await _collect(jobs)
-    _store_scan_cache(cache, key, result.get("findings"), cache_ttl)
+    if not _is_fully_degraded(result, len(jobs)):
+        _store_scan_cache(cache, key, result.get("findings"), cache_ttl, result.get("errors"))
     return result
 
 
@@ -391,12 +489,14 @@ async def scan_repo(
     allowed_root: Path | None = None,
     cache: FindingCache | None = None,
     cache_ttl: float | None = None,
+    exclude: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Deep-scan a repo checkout: validate the path, fan out, collect.
 
     Cache-first when ``cache`` is given, keyed on the directory content
-    digest (relpath + size + mtime) so edits invalidate. Guard statuses
-    (empty/invalid path) are never cached.
+    digest (relpath + size + mtime, minus ``exclude``) so edits invalidate
+    while media churn does not. Guard statuses (empty/invalid path) and
+    fully-degraded results (all scanners not-installed) are never cached.
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -408,9 +508,11 @@ async def scan_repo(
     except FileNotFoundError:
         return {"status": "invalid-path", "findings": [], "reason": "not-found"}
     key = ""
+    excludes = _normalize_excludes(exclude)
     if cache is not None:
         key = make_scan_key(
-            f"repo:{target}|{_dir_fingerprint(target)}",
+            f"repo:{target}|{_dir_fingerprint(target, excludes)}"
+            f"\x00exclude:{','.join(sorted(excludes))}",
             scanner_versions=scanner_fingerprint(),
         )
         hit = _lookup_scan_cache(cache, key)
@@ -422,7 +524,8 @@ async def scan_repo(
         ("betterleaks", _run_betterleaks_path(str(target), budget)),
     ]
     result = await _collect(jobs)
-    _store_scan_cache(cache, key, result.get("findings"), cache_ttl)
+    if not _is_fully_degraded(result, len(jobs)):
+        _store_scan_cache(cache, key, result.get("findings"), cache_ttl, result.get("errors"))
     return result
 
 

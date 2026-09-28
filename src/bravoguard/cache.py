@@ -177,8 +177,12 @@ class FindingCache:
         self._conn.commit()
         return self._conn
 
-    def get(self, key: str) -> list[dict[str, Any]] | None:
-        """Return cached findings on hit, None on miss/expiry/corruption."""
+    def get(self, key: str) -> list[dict[str, Any]] | dict[str, Any] | None:
+        """Return the cached payload on hit, None on miss/expiry/corruption.
+
+        Scan entries are ``{"findings": [...], "errors": {...}}`` envelopes;
+        legacy list-only payloads and OSV vuln lists still read back as-is.
+        """
         if not key:
             return None
         try:
@@ -204,13 +208,16 @@ class FindingCache:
                 self._connect().execute("DELETE FROM cache_entries WHERE key = ?", (key,))
                 self._connect().commit()
             return None
-        return value if isinstance(value, list) else None
+        return value if isinstance(value, (list, dict)) else None
 
     def put(
-        self, key: str, findings: list[dict[str, Any]], ttl_seconds: float | None = None
+        self,
+        key: str,
+        findings: list[dict[str, Any]] | dict[str, Any],
+        ttl_seconds: float | None = None,
     ) -> None:
-        """Write findings through; never raises on storage errors."""
-        if not key or not isinstance(findings, list):
+        """Write findings (or a findings+errors envelope) through; never raises."""
+        if not key or not isinstance(findings, (list, dict)):
             return
         try:
             payload = json.dumps(findings)
@@ -262,13 +269,15 @@ def reset_default_cache() -> None:
     _default_cache = None
 
 
-def get(key: str) -> list[dict[str, Any]] | None:
+def get(key: str) -> list[dict[str, Any]] | dict[str, Any] | None:
     """Hit the default file cache."""
     return get_default_cache().get(key)
 
 
 def put(
-    key: str, findings: list[dict[str, Any]], ttl_seconds: float | None = None
+    key: str,
+    findings: list[dict[str, Any]] | dict[str, Any],
+    ttl_seconds: float | None = None,
 ) -> None:
     """Write through to the default file cache."""
     get_default_cache().put(key, findings, ttl_seconds=ttl_seconds)

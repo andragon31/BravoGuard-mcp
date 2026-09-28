@@ -255,3 +255,60 @@ def test_osv_lookup_fetcher_write_through() -> None:
         assert cache.get(make_osv_key("flask", "3.0", scanner_versions=scanner_fingerprint())) == vulns
     finally:
         cache.close()
+
+
+def _missing_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_create(*argv: str, **kwargs: object):
+        raise FileNotFoundError(str(argv[0]))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+
+def test_fully_degraded_result_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    cache = FindingCache(":memory:")
+    try:
+        _missing_everything(monkeypatch)
+        first = asyncio.run(orchestrator.scan_diff(SEED_DIFF, cache=cache))
+        assert first["status"] == "ok"
+        assert first["findings"] == []
+        assert first["errors"] == {
+            "sast": "not-installed",
+            "bandit": "not-installed",
+            "betterleaks": "not-installed",
+        }
+        calls: list = []
+        install_fake(monkeypatch, calls)
+        second = asyncio.run(orchestrator.scan_diff(SEED_DIFF, cache=cache))
+        assert "cached" not in second
+        assert len(calls) == 3
+    finally:
+        cache.close()
+
+
+def test_cache_hit_preserves_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        name = Path(str(argv[0])).name
+        if name == "semgrep":
+            return FakeProcess(json.dumps({"results": []}).encode(), 0)
+        if name == "betterleaks":
+            return FakeProcess(b"[]", 0)
+        raise FileNotFoundError(name)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    cache = FindingCache(":memory:")
+    try:
+        first = asyncio.run(orchestrator.scan_diff(SEED_DIFF, cache=cache))
+        assert first["status"] == "ok"
+        assert first["errors"] == {"bandit": "not-installed"}
+        assert "cached" not in first
+
+        def _forbidden(*argv: str, **kwargs: object):
+            raise AssertionError("cache hit must skip subprocesses")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _forbidden)
+        second = asyncio.run(orchestrator.scan_diff(SEED_DIFF, cache=cache))
+        assert second["cached"] is True
+        assert second["errors"] == {"bandit": "not-installed"}
+        assert second["findings"] == first["findings"]
+    finally:
+        cache.close()
