@@ -31,7 +31,16 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   cache; `scan_repo` keys on a directory content digest so edits invalidate).
   `osv_lookup` is cache-first via `make_osv_key` with a `fetcher` hook left
   for the T4 scanner wiring. Payloads are never logged; cache failures never
-  fail a scan.
+  fail a scan. T4 wiring (`src/bravoguard/osv.py` + server delegation):
+  subprocess-first `fetch_osv` — `osv-scanner --package/--version --format json`
+  first, `pip-audit -r <pinned requirements> --format=json` fallback when the
+  primary is missing or fails (timeouts propagate), argv lists via
+  `run_scanner_json` (never `shell=True`, 60s budget). Both outputs parse to
+  `{id, severity, summary, package, version}` (+ `cwe` when present) with
+  `normalize_osv_vulns` mapping to `FINDING_KEYS`; `server.osv_lookup`
+  delegates with `fetcher=fetch_osv` (hits return `cached: True` without a
+  subprocess; no binary -> `unavailable`). Seeded e2e
+  (`tests/test_e2e_scan.py`): eval/pickle/innerHTML diff -> >=1 A05 finding.
 
 ## [0.1.0] — skeleton
 - FastMCP 4 + MCP SDK 2 stdio server with 5 stub tools.

@@ -19,8 +19,8 @@ Review: RDD on (global on) but OpenCode V2 review transport unavailable, so no r
 ## Tasks
 - [x] T1 (delegated direct — writer trigger: 2+ non-trivial files; preparation trigger: reading pyproject + server.py prepares write so belongs to writer): Orchestrator subprocess real — DONE ses_f19952995ffe2X5h1dGzrq4iX1, 10 tests, 16 passed. Parent spot-check: `uv run pytest -q` 16 passed. Commit 8d3996c.
 - [x] T2 (delegated direct — writer trigger): Normalizer one schema — DONE ses_f198dc3bbffe4ZNVX3z6XTj7SA, 9 tests, 25 passed total. Parent spot-check: `uv run pytest -q` 25 passed. Commit 7b9a47c.
-- [x] T3 (delegated direct — writer trigger): SQLite cache — DONE ses_f198a691effejSHmZvjkoZHJVQ, 14 tests, 39 passed total. Parent spot-check: `uv run pytest -q` 39 passed.
-- [ ] T4 (delegated direct — writer trigger): `osv_lookup` real + e2e `scan_diff` fixture — osv-scanner/pip-audit JSON + cache, seeded vuln diff -> 1 A05 finding (CWE-79/89/78). Tests: fixture e2e + osv cache test.
+- [x] T3 (delegated direct — writer trigger): SQLite cache — DONE ses_f198a691effejSHmZvjkoZHJVQ, 14 tests, 39 passed total. Parent spot-check: `uv run pytest -q` 39 passed. Commit d017b42.
+- [x] T4 (delegated direct — writer trigger): `osv_lookup` real + e2e `scan_diff` fixture — DONE ses_f1986a3ccffeeFh0RNhHJDcW1h, 13 tests, 52 passed total. Parent spot-check: `uv run pytest -q` 52 passed.
 - [ ] T5 (delegated direct — writer trigger): `suggest_fix` templates — `rule_id -> template` table before any LLM fallback, minimal fix suggestion. Tests: template per seed rule + empty-finding guard.
 
 ## Progress

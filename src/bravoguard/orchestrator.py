@@ -436,12 +436,11 @@ async def osv_lookup(
     cache_ttl: float | None = None,
     fetcher: Callable[[str, str], Awaitable[list[dict[str, Any]]]] | None = None,
 ) -> dict[str, Any]:
-    """Cache-first OSV hook; the real osv-scanner/pip-audit call lands in T4.
+    """Cache-first OSV hook; pass ``fetcher=bravoguard.osv.fetch_osv`` for T4 real scanners.
 
     On a cache hit returns ``{"status": "ok", "vulns": [...], "cached": True}``
-    without invoking ``fetcher``. Without a fetcher (T4 not done) a miss
-    returns the explicit ``not-implemented`` stub. Empty packages are never
-    cached.
+    without invoking ``fetcher``. Without a fetcher a miss returns the
+    explicit ``not-implemented`` stub. Empty packages are never cached.
     """
     if not (package or "").strip():
         return {"status": "empty-package", "vulns": []}

@@ -1,9 +1,10 @@
-"""BRAVOGuard MCP server (Phase 1, T1 orchestrated).
+"""BRAVOGuard MCP server (Phase 1, T1 orchestrated, T4 OSV real).
 
 Exposes five tools over stdio (FastMCP 4 + MCP SDK 2.0). `scan_diff` and
 `scan_repo` fan out to real scanner subprocesses via `bravoguard.orchestrator`
 (argv lists, never shell, every call under a wait_for budget); `osv_lookup`
-and `suggest_fix` stay not-implemented until T4/T5.
+runs the real osv-scanner/pip-audit fetcher cache-first; `suggest_fix` stays
+not-implemented until T5.
 
 Engines (all subprocess-first, pinned independently):
 - SAST: semgrep 1.176 (+ rules/) with opengrep v1.26 fallback (same JSON/SARIF)
@@ -19,9 +20,10 @@ import asyncio
 from fastmcp import FastMCP
 
 from bravoguard import orchestrator
-from bravoguard.cache import FindingCache, get_default_cache, make_osv_key
+from bravoguard.cache import FindingCache, get_default_cache
 from bravoguard.normalizer import FINDING_KEYS
 from bravoguard.orchestrator import DEFAULT_TIMEOUT_SECONDS, DIFF_TIMEOUT_SECONDS
+from bravoguard.osv import fetch_osv
 
 # Re-exported for backwards compatibility (single source: normalizer).
 assert orchestrator.FINDING_KEYS == FINDING_KEYS
@@ -72,19 +74,34 @@ async def scan_repo(path: str, timeout: int = DEFAULT_TIMEOUT_SECONDS, cache_ttl
 
 
 @mcp.tool()
-async def osv_lookup(package: str, version: str) -> dict:
+async def osv_lookup(package: str, version: str, cache_ttl: float | None = None) -> dict:
     """Look up known vulnerabilities for a package version via OSV.
 
-    Phase-1 target: call osv-scanner/pip-audit JSON output, cache in SQLite
-    keyed on package@version + DB UpdatedAt.
+    Cache-first (SQLite write-through keyed on package@version): hits return
+    ``cached: True`` without spawning a subprocess. Misses run
+    ``bravoguard.osv.fetch_osv`` (osv-scanner JSON first, pip-audit fallback);
+    with no scanner binary installed the tool reports ``unavailable``.
     """
     if not package.strip():
         return {"status": "empty-package", "vulns": []}
-    cached = _scan_cache().get(make_osv_key(package.strip(), (version or "").strip()))
-    if cached is not None:
-        return {"status": "ok", "vulns": cached, "cached": True}
-    # Real osv-scanner/pip-audit wiring lands in T4; keep the stub explicit.
-    return {"status": "not-implemented", "task": f"osv_lookup:{package}@{version}"}
+    try:
+        return await orchestrator.osv_lookup(
+            package,
+            version,
+            cache=_scan_cache(),
+            cache_ttl=cache_ttl,
+            fetcher=fetch_osv,
+        )
+    except orchestrator.ScannerTimeoutError as exc:
+        return {"status": "unavailable", "reason": f"scanner timed out: {exc.binary}", "vulns": []}
+    except orchestrator.ScannerMissingError as exc:
+        return {
+            "status": "unavailable",
+            "reason": f"scanner not installed: {exc.binary}",
+            "vulns": [],
+        }
+    except orchestrator.OrchestratorError:
+        return {"status": "unavailable", "reason": "scanner failed", "vulns": []}
 
 
 @mcp.tool()
