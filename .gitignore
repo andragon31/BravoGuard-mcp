@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# uv
+.uv/
+uv.lock.bak
+
+# Test / cache
+.pytest_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ty/
+.ty_cache/
+.pyrefly/
+.ruff_cache/
+.cache/
+*.db
+*.sqlite
+*.sqlite3
+*.bak-*
+*.sarif
+reports/
+
+# Logs and local review output
+*.log
+logs/
+review.md
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local tool state (never public)
+.opencode/
+.atl/
+.codegraph/
+.env
+.env.*
+
+# Frontend lane leftovers (when testing JS scanners locally)
+node_modules/
+dist-frontend/

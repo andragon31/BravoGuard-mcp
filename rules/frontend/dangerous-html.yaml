@@ -1,0 +1,23 @@
+rules:
+  - id: bravoguard-frontend-dangerous-html
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Avoid dangerouslySetInnerHTML with untrusted data (CWE-79). Prefer textContent or a sanitizer.
+    metadata:
+      cwe: "CWE-79"
+      owasp_2025: A05
+      fix_hint: "Use textContent or DOMPurify.sanitize before dangerouslySetInnerHTML."
+    pattern: dangerouslySetInnerHTML={{ __html: $HTML }}
+  - id: bravoguard-frontend-bypass-security-trust
+    languages: [javascript, typescript]
+    severity: WARNING
+    message: Avoid bypassSecurityTrustHtml/Url/ResourceUrl (CWE-79). Sanitize and allowlist instead.
+    metadata:
+      cwe: "CWE-79"
+      owasp_2025: A05
+      fix_hint: "Remove bypassSecurityTrust* and sanitize with an allowlist."
+    patterns:
+      - pattern-either:
+          - pattern: $SANITIZER.bypassSecurityTrustHtml(...)
+          - pattern: $SANITIZER.bypassSecurityTrustUrl(...)
+          - pattern: $SANITIZER.bypassSecurityTrustResourceUrl(...)

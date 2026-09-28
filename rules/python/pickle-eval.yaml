@@ -1,0 +1,22 @@
+rules:
+  - id: bravoguard-python-pickle-load
+    languages: [python]
+    severity: ERROR
+    message: Avoid pickle.load on untrusted input (CWE-502). Use json or a safe serializer.
+    metadata:
+      cwe: "CWE-502"
+      owasp_2025: A08
+      fix_hint: "Replace pickle.load with json.load or a safe allowlisted deserializer."
+    pattern: pickle.load(...)
+  - id: bravoguard-python-eval-exec
+    languages: [python]
+    severity: ERROR
+    message: Avoid eval/exec on dynamic input (CWE-95). Refactor to a safe parser or allowlist dispatch.
+    metadata:
+      cwe: "CWE-95"
+      owasp_2025: A05
+      fix_hint: "Replace eval/exec with ast.literal_eval or an explicit allowlist dispatch."
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)

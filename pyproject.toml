@@ -1,0 +1,48 @@
+[project]
+name = "bravoguard"
+version = "0.1.0"
+description = "Security-first MCP server: unified SAST, supply-chain, secrets, and OWASP mapping for AI agents."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=4",
+    "mcp>=2.0.0",
+]
+
+[project.optional-dependencies]
+# NOTE: scanner CLIs are intentionally NOT installed in this venv.
+# semgrep 1.176 pins mcp==1.29 which conflicts with our mcp>=2.0.0,
+# so all scanners install isolated (pipx / uv tool / standalone binaries)
+# and are invoked as subprocesses. `uv sync --all-extras` stays green.
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+artifacts = ["src/bravoguard/*.json"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bravoguard"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[project.urls]
+Repository = "https://github.com/Andragon/BravoGuard-mcp"
+Issues = "https://github.com/Andragon/BravoGuard-mcp/issues"
+Changelog = "https://github.com/Andragon/BravoGuard-mcp/blob/main/CHANGELOG.md"
+
+[project.scripts]
+bravoguard = "bravoguard.cli:main"
+
+[tool.uv]
+# `uv sync --all-extras` installs core + dev; scanners stay isolated (pipx/uv-tool) by design.

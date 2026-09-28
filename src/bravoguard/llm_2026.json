@@ -1,0 +1,17 @@
+{
+  "version": "2026",
+  "published": "2026-08-04",
+  "source": "OWASP Top 10 for LLM Applications 2026 (genai.owasp.org)",
+  "risks": [
+    {"id": "LLM01:2026", "title": "Prompt Injection", "summary": "Malicious input overrides intended instructions, incl. zero-click indirect injection (e.g. EchoLeak CVE-2025-32711)."},
+    {"id": "LLM02:2026", "title": "Sensitive Information Disclosure", "summary": "Cross-tenant leakage via retrieval, scores/timing, or auth flaws compounding RAG."},
+    {"id": "LLM03:2026", "title": "Excessive Agency", "summary": "Over-permissioned tools/memory allow unintended actions. Promoted from 6th to 3rd."},
+    {"id": "LLM04:2026", "title": "Supply Chain", "summary": "Poisoned data, models, components, and plugins in the LLM lifecycle."},
+    {"id": "LLM05:2026", "title": "Data and Model Poisoning", "summary": "Training/fine-tune/RAG data tampering (was Training Data Poisoning)."},
+    {"id": "LLM06:2026", "title": "Unbounded Consumption", "summary": "Resource exhaustion / Model DoS broadened beyond rate limits."},
+    {"id": "LLM07:2026", "title": "Misinformation", "summary": "Overreliance reframed: plausible but false outputs acted on without verification."},
+    {"id": "LLM08:2026", "title": "Hidden Context Exposure", "summary": "System prompt leakage renamed: hidden instructions/context revealed."},
+    {"id": "LLM09:2026", "title": "Weak Vectors and Embeddings", "summary": "New: embedding inversion, similarity leakage, weak access control on retrieval."},
+    {"id": "LLM10:2026", "title": "Improper Output Handling", "summary": "Unsanitized model output passed to sinks (was 5th, now 10th)."}
+  ]
+}

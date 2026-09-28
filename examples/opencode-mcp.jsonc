@@ -1,0 +1,27 @@
+// Example global OpenCode MCP config for BRAVOGuard. Copy to your
+// OpenCode config and adjust paths. No real tokens are stored here.
+{
+  // BRAVOGuard MCP server over stdio (uv, no install step needed beyond uv sync)
+  "mcp": {
+    "bravoguard": {
+      "type": "local",
+      "command": [
+        "uv",
+        "--directory",
+        "C:/Users/Andragon/Documents/Github/BravoGuard-mcp",
+        "run",
+        "src/bravoguard/server.py"
+      ],
+      "enabled": true
+    }
+  },
+  // Reference: run these scanners as CLI steps around BRAVOGuard, not as MCP servers
+  // semgrep --config C:/Users/Andragon/Documents/Github/BravoGuard-mcp/rules --json (opengrep fallback: same args)
+  // betterleaks dir --config gitleaks.toml (edge, offline) + trufflehog --results=verified (scheduled verify)
+  // trivy fs --format sarif C:/Users/Andragon/Documents/Github/BravoGuard-mcp
+  // oxlint . --format json (primary) + eslint . --format json (specialist: Hooks/Next/a11y/security)
+  "env": {
+    // GITHUB_TOKEN is read from the environment, never hardcoded.
+    // Example: "GITHUB_TOKEN": "{env:GITHUB_TOKEN}"
+  }
+}

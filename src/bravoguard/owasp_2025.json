@@ -1,0 +1,34 @@
+{
+  "version": "2025",
+  "source": "https://owasp.org/Top10/ — OWASP Top 10:2025",
+  "categories": {
+    "A01": "Broken Access Control",
+    "A02": "Security Misconfiguration",
+    "A03": "Software Supply Chain Failures",
+    "A04": "Cryptographic Failures",
+    "A05": "Injection",
+    "A06": "Insecure Design",
+    "A07": "Authentication Failures",
+    "A08": "Software or Data Integrity Failures",
+    "A09": "Security Logging and Alerting Failures",
+    "A10": "Mishandling of Exceptional Conditions"
+  },
+  "cwe_map": {
+    "CWE-79": "A05",
+    "CWE-89": "A05",
+    "CWE-78": "A05",
+    "CWE-95": "A05",
+    "CWE-502": "A08",
+    "CWE-798": "A07",
+    "CWE-918": "A01"
+  },
+  "notes": {
+    "CWE-79": "XSS — Injection (A05:2025, was A03 in 2021)",
+    "CWE-89": "SQL injection — Injection (A05:2025)",
+    "CWE-78": "OS command injection — Injection (A05:2025)",
+    "CWE-95": "Eval injection — Injection (A05:2025)",
+    "CWE-502": "Deserialization of untrusted data — A08:2025",
+    "CWE-798": "Hard-coded credentials — A07:2025",
+    "CWE-918": "SSRF — A01:2025 (was A10 in 2021)"
+  }
+}

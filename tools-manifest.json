@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "note": "External (non-PyPI) binaries. Python CLIs come from `uv sync --extra scanners`. This manifest is the single pin source; scripts/install_external.py verifies it so installs fail fast instead of stub-silent.",
+  "binaries": [
+    {"name": "opengrep", "version": "v1.26.0", "role": "Semgrep LGPL fallback", "source": "github:opengrep/opengrep"},
+    {"name": "osv-scanner", "version": "V2", "role": "OSV lookup", "source": "github:google/osv-scanner"},
+    {"name": "syft", "version": "1.51.1", "role": "SBOM", "source": "github:anchore/syft"},
+    {"name": "trivy", "version": "0.74.0", "role": "container/IaC/secrets all-in-one", "source": "github:aquasecurity/trivy", "pin_by": "release SHA, re-verify each upgrade"},
+    {"name": "grype", "version": "0.118.0", "role": "optional 2nd-opinion vuln matcher", "source": "github:anchore/grype"},
+    {"name": "checkov", "version": "latest", "role": "IaC depth", "source": "github:bridgecrewio/checkov"},
+    {"name": "betterleaks", "version": "latest", "role": "secrets edge (gitleaks-compatible)", "source": "github:gitleaks/betterleaks", "fallback": "gitleaks v8.28"},
+    {"name": "trufflehog", "version": "v3.95.x", "role": "secrets verify", "source": "github:trufflesecurity/trufflehog"},
+    {"name": "oxlint", "version": "1.65.0", "role": "frontend primary lint", "source": "npm:oxlint"},
+    {"name": "biome", "version": "2.4+", "role": "frontend lint+format (new projects)", "source": "npm:@biomejs/biome"},
+    {"name": "eslint", "version": "10.4.0", "role": "frontend specialist (Hooks/Next/a11y/security)", "source": "npm:eslint"},
+    {"name": "knip", "version": "5", "role": "dead code", "source": "npm:knip"},
+    {"name": "madge", "version": "8", "role": "circular deps", "source": "npm:madge"},
+    {"name": "jscpd", "version": "4", "role": "duplicates", "source": "npm:jscpd"}
+  ]
+}
