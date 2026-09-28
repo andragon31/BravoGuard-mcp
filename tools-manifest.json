@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "note": "External (non-PyPI) binaries. Python CLIs come from `uv sync --extra scanners`. This manifest is the single pin source; scripts/install_external.py verifies it so installs fail fast instead of stub-silent.",
+  "note": "External (non-PyPI) binaries. Python CLIs install isolated (pipx / uv tool) on purpose, never in the project venv. This manifest is the single pin source; scripts/install_external.py verifies it so installs fail fast instead of stub-silent.",
   "binaries": [
     {"name": "opengrep", "version": "v1.26.0", "role": "Semgrep LGPL fallback", "source": "github:opengrep/opengrep"},
     {"name": "osv-scanner", "version": "V2", "role": "OSV lookup", "source": "github:google/osv-scanner"},

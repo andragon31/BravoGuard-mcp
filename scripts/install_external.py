@@ -48,7 +48,7 @@ def main() -> int:
         print("BRAVOGuard install incomplete. Missing:")
         for m in missing:
             print(f"  - {m}")
-        print("\nFix: uv sync --all-extras, then pipx/uv-tool + binaries per tools-manifest.json.")
+        print("\nFix: pipx/uv-tool for Python CLIs + binaries per tools-manifest.json (scanners stay isolated, never in the project venv).")
         print("Pinned versions:", ", ".join(f"{k}={v}" for k, v in pinned.items()))
         return 1
     print(f"BRAVOGuard install OK ({len(pinned)} tools pinned, verified).")

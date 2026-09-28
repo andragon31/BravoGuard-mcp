@@ -49,6 +49,15 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   `{suggestion, rule_id, cwe, owasp_ref}` (`status: ok`, empty-finding guard
   preserved). No LLM calls.
 
+### Fixed
+- S1 isolated-scanner setup: `tools-manifest.json` note and
+  `scripts/install_external.py` fix hint no longer reference the nonexistent
+  `uv sync --extra scanners` path — Python CLIs install isolated
+  (pipx / `uv tool`), never in the project venv. Verified with semgrep
+  1.178.0 + bandit 1.9.4 (`uv tool install`), osv-scanner 2.0.3 + gitleaks
+  v8.28.0 fallback (`go install`, GOBIN `~/.local/bin`); guarddog blocked by
+  a `nono-py` build failure on Windows (honest partial, evidence in task).
+
 ## [V3] — venv-proof gap fixes
 
 ### Added
