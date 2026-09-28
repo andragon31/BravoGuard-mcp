@@ -3,8 +3,8 @@
 Exposes five tools over stdio (FastMCP 4 + MCP SDK 2.0). `scan_diff` and
 `scan_repo` fan out to real scanner subprocesses via `bravoguard.orchestrator`
 (argv lists, never shell, every call under a wait_for budget); `osv_lookup`
-runs the real osv-scanner/pip-audit fetcher cache-first; `suggest_fix` stays
-not-implemented until T5.
+runs the real osv-scanner/pip-audit fetcher cache-first; `suggest_fix`
+returns rule-aware templates from `bravoguard.suggest` (no LLM calls).
 
 Engines (all subprocess-first, pinned independently):
 - SAST: semgrep 1.176 (+ rules/) with opengrep v1.26 fallback (same JSON/SARIF)
@@ -24,6 +24,7 @@ from bravoguard.cache import FindingCache, get_default_cache
 from bravoguard.normalizer import FINDING_KEYS
 from bravoguard.orchestrator import DEFAULT_TIMEOUT_SECONDS, DIFF_TIMEOUT_SECONDS
 from bravoguard.osv import fetch_osv
+from bravoguard.suggest import suggest_for_finding
 
 # Re-exported for backwards compatibility (single source: normalizer).
 assert orchestrator.FINDING_KEYS == FINDING_KEYS
@@ -120,8 +121,7 @@ async def suggest_fix(finding: dict) -> dict:
     """
     if not finding:
         return {"status": "empty-finding", "suggestion": ""}
-    # Rule-aware templates land in T5; keep the stub explicit.
-    return {"status": "not-implemented", "task": "suggest_fix"}
+    return {"status": "ok", **suggest_for_finding(finding)}
 
 
 def main() -> None:

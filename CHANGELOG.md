@@ -41,6 +41,13 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   delegates with `fetcher=fetch_osv` (hits return `cached: True` without a
   subprocess; no binary -> `unavailable`). Seeded e2e
   (`tests/test_e2e_scan.py`): eval/pickle/innerHTML diff -> >=1 A05 finding.
+- T5 Suggest (`src/bravoguard/suggest.py` + server delegation): template-first
+  `suggest_fix` - `rule_id -> template` table (eval/exec CWE-95 ->
+  `ast.literal_eval`, pickle/B301 CWE-502 -> `json`, innerHTML CWE-79 ->
+  `textContent`/sanitizer, generic-api-key CWE-798 -> env var) with CWE
+  fallback and a generic template carrying the `owasp_map` reference; output
+  `{suggestion, rule_id, cwe, owasp_ref}` (`status: ok`, empty-finding guard
+  preserved). No LLM calls.
 
 ## [0.1.0] — skeleton
 - FastMCP 4 + MCP SDK 2 stdio server with 5 stub tools.
