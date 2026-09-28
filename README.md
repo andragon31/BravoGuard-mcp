@@ -39,12 +39,37 @@ Two-layer philosophy: fast offline gates at the edge (`scan_diff`), verified dee
 
 ## Quickstart (uv — full install, no silent stubs)
 
-```bash
+Windows (PowerShell):
+
+```powershell
 cd C:/Users/Andragon/Documents/Github/BravoGuard-mcp
 uv sync --all-extras
-uv run scripts/install_external.py
+uv run scripts/install.py --install        # dry-run first: lists actions + pins
+uv run scripts/install.py --install --yes  # execute user-local installs
+uv run scripts/install.py --check          # verify (guarddog warns + skips on Windows)
 uv run src/bravoguard/server.py
 ```
+
+Linux (bash — same installer, apt/brew path):
+
+```bash
+cd ~/BravoGuard-mcp
+uv sync --all-extras
+uv run scripts/install.py --install        # dry-run first: lists actions + pins
+uv run scripts/install.py --install --yes  # execute user-local installs
+uv run scripts/install.py --check          # verify
+```
+
+- `scripts/install.py` is the cross-platform installer: Python CLIs (`semgrep`,
+  `bandit`, `guarddog`, `pip-audit`, `ruff`) go isolated via `uv tool install`
+  (fallback `pipx install`), never in the project venv; binaries follow
+  `tools-manifest.json` pins via winget (fallback choco/scoop/npm/go) on
+  Windows and apt/brew/npm/go on Linux. Mutation requires `--yes`; without it
+  every run is a dry-run that lists actions. Guarddog skips on Windows with a
+  warning (known `nono-py` build failure) unless `--force-guarddog`.
+- `scripts/install_external.py` stays the verifier (fail-fast PATH check).
+- Linux proof via Docker: `powershell -File docker/run-linux-proof.ps1`
+  (Windows) or `bash docker/run-linux-proof.sh` — see `docs/DOCKER_PROOF.md`.
 
 - `uv sync --all-extras` installs core (fastmcp+mcp) + dev. Scanners instalan aislados a propósito: semgrep 1.176 pinea `mcp==1.29` y rompería el venv con `mcp>=2.0.0`, así que van por `pipx install / uv tool install` + binarios en PATH.
 - `scripts/install_external.py` verifies Go/JS + Python CLIs pinned in `tools-manifest.json` (trivy, osv-scanner, syft, betterleaks, trufflehog, oxlint, etc.) and fails fast with the fix if anything is missing.

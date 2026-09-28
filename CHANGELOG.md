@@ -48,6 +48,28 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   fallback and a generic template carrying the `owasp_map` reference; output
   `{suggestion, rule_id, cwe, owasp_ref}` (`status: ok`, empty-finding guard
   preserved). No LLM calls.
+- X1 Installer (`scripts/install.py`, ~200 lines): cross-platform
+  Windows + Linux installer driven by `tools-manifest.json` pins.
+  `--check` reuses `scripts/install_external.py` check functions (verifier
+  unchanged); `--install` dry-runs by default and mutates only with `--yes`;
+  `--strict` adds optional tools. Python CLIs install isolated
+  (`uv tool install`, fallback `pipx install`), never in the project venv;
+  binaries via winget (fallback choco/scoop/npm/go) on Windows and
+  apt/brew/npm/go on Linux; every action prints tool + pinned version.
+  Guarddog skips on Windows with a warning (known `nono-py` build failure)
+  unless `--force-guarddog`. Unit-tested for both platforms with mocks
+  (`tests/test_install.py`); README quickstart covers Windows + Linux.
+- X2 Docker Linux proof (`docker/Dockerfile.linux-test`, `docker/proof-linux.sh`,
+  `docker/run-linux-proof.ps1`/`.sh`): `python:3.11-slim-bookworm` image with
+  `uv sync --frozen`, isolated Python CLIs (`semgrep bandit guarddog pip-audit ruff`
+  -- guarddog builds on Linux, no Windows skip), Go binaries
+  (`osv-scanner`, `betterleaks`/gitleaks fallback, best-effort `opengrep`) and
+  `oxlint` via npm, versions from `tools-manifest.json`. In-container proof runs
+  `pytest` + `ruff` + `install.py --check` + `bravoguard doctor` + seeded
+  `scan_diff` (>=1 real finding) + `osv_lookup`, logging to `/tmp/proof.log`.
+  Host runners gate on `docker info` first (exit 2 honest-blocked when the
+  daemon is down). Contract-tested without a daemon (`tests/test_docker.py`);
+  see `docs/DOCKER_PROOF.md`.
 
 ### Fixed
 - S1 isolated-scanner setup: `tools-manifest.json` note and
