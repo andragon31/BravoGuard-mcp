@@ -4,7 +4,8 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
 
 - SAST: ``semgrep --config rules/ --json`` with ``opengrep`` fallback (same args).
 - Python: ``bandit -f json`` over the scan target.
-- Secrets: ``betterleaks detect`` (diff via stdin, repo via path).
+- Secrets: ``betterleaks detect`` (diff via stdin, repo via path) with a
+  ``gitleaks`` v8 fallback (same flags) when betterleaks is missing.
 
 Security properties:
 
@@ -21,6 +22,7 @@ import contextlib
 import fnmatch
 import hashlib
 import json
+import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -40,6 +42,8 @@ DEFAULT_TIMEOUT_SECONDS = 120
 
 SEMGREP_ENGINE = "semgrep"
 OPENGREP_FALLBACK = "opengrep"
+BETTERLEAKS_ENGINE = "betterleaks"
+GITLEAKS_FALLBACK = "gitleaks"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
@@ -71,16 +75,19 @@ DEFAULT_EXCLUDES: tuple[str, ...] = (
 )
 
 __all__ = [
+    "BETTERLEAKS_ENGINE",
     "DEFAULT_EXCLUDES",
     "DEFAULT_TIMEOUT_SECONDS",
     "DIFF_TIMEOUT_SECONDS",
     "FINDING_KEYS",
+    "GITLEAKS_FALLBACK",
     "OPENGREP_FALLBACK",
     "SEMGREP_ENGINE",
     "normalize_bandit",
     "normalize_betterleaks",
     "normalize_findings",
     "normalize_semgrep",
+    "resolve_secrets_binary",
 ]
 
 
@@ -123,19 +130,33 @@ def bandit_argv(target: str) -> list[str]:
     return ["bandit", "-f", "json", "-q", "-r", target]
 
 
-def betterleaks_stdin_argv() -> list[str]:
+def resolve_secrets_binary() -> str | None:
+    """Secrets-edge engine: betterleaks first, gitleaks fallback, else None.
+
+    Gitleaks v8 accepts the same ``detect`` flags, so either binary serves the
+    lane; ``None`` means neither is on PATH.
+    """
+    if shutil.which(BETTERLEAKS_ENGINE) is not None:
+        return BETTERLEAKS_ENGINE
+    if shutil.which(GITLEAKS_FALLBACK) is not None:
+        return GITLEAKS_FALLBACK
+    return None
+
+
+def betterleaks_stdin_argv(binary: str = BETTERLEAKS_ENGINE) -> list[str]:
     """Secrets edge scan reading a diff from stdin.
 
-    Gitleaks v8-style flags (``detect --no-git --source``); betterleaks is
-    pinned as gitleaks-compatible in tools-manifest.json (fallback gitleaks
-    v8.28). Missing binary raises ScannerMissingError, never crashes.
+    Gitleaks v8-style flags (``detect --no-git --source``), identical for
+    both engines; betterleaks is pinned as gitleaks-compatible in
+    tools-manifest.json (fallback gitleaks v8.28). Missing binaries raise
+    ScannerMissingError, never crash.
     """
-    return ["betterleaks", "detect", "--no-git", "--source", "-"]
+    return [binary, "detect", "--no-git", "--source", "-"]
 
 
-def betterleaks_path_argv(target: str) -> list[str]:
+def betterleaks_path_argv(target: str, binary: str = BETTERLEAKS_ENGINE) -> list[str]:
     """Secrets scan of a repo checkout path (same pin, see above)."""
-    return ["betterleaks", "detect", "--no-git", "--source", target]
+    return [binary, "detect", "--no-git", "--source", target]
 
 
 async def run_scanner_json(
@@ -299,18 +320,44 @@ async def _run_bandit(target: str, timeout: float) -> tuple[str, Any]:
     return "bandit", payload
 
 
-async def _run_betterleaks_stdin(diff_bytes: bytes, timeout: float) -> tuple[str, Any]:
-    payload = await run_scanner_json(
-        betterleaks_stdin_argv(), input_data=diff_bytes, timeout=timeout
-    )
+async def _run_secrets_with_fallback(
+    primary: list[str], fallback: list[str], *, input_data: bytes | None, timeout: float
+) -> tuple[str, Any]:
+    """Try ``primary`` (betterleaks), then the resolved gitleaks ``fallback``.
+
+    Same try-next-candidate shape as semgrep/opengrep. The ``betterleaks``
+    result label is kept so normalization is unchanged; a combined missing
+    error surfaces only when neither binary runs.
+    """
+    try:
+        payload = await run_scanner_json(primary, input_data=input_data, timeout=timeout)
+        return "betterleaks", payload
+    except ScannerMissingError:
+        if resolve_secrets_binary() != GITLEAKS_FALLBACK:
+            raise ScannerMissingError(f"{BETTERLEAKS_ENGINE}/{GITLEAKS_FALLBACK}") from None
+    try:
+        payload = await run_scanner_json(fallback, input_data=input_data, timeout=timeout)
+    except ScannerMissingError:
+        raise ScannerMissingError(f"{BETTERLEAKS_ENGINE}/{GITLEAKS_FALLBACK}") from None
     return "betterleaks", payload
+
+
+async def _run_betterleaks_stdin(diff_bytes: bytes, timeout: float) -> tuple[str, Any]:
+    return await _run_secrets_with_fallback(
+        betterleaks_stdin_argv(),
+        betterleaks_stdin_argv(GITLEAKS_FALLBACK),
+        input_data=diff_bytes,
+        timeout=timeout,
+    )
 
 
 async def _run_betterleaks_path(target: str, timeout: float) -> tuple[str, Any]:
-    payload = await run_scanner_json(
-        betterleaks_path_argv(target), input_data=None, timeout=timeout
+    return await _run_secrets_with_fallback(
+        betterleaks_path_argv(target),
+        betterleaks_path_argv(target, GITLEAKS_FALLBACK),
+        input_data=None,
+        timeout=timeout,
     )
-    return "betterleaks", payload
 
 
 _NORMALIZERS = {

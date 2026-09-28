@@ -72,6 +72,30 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   see `docs/DOCKER_PROOF.md`.
 
 ### Fixed
+- R2 secrets-edge fallback (`feature/bravoguard-remaining-100`,
+  `src/bravoguard/orchestrator.py` + `src/bravoguard/cli.py` +
+  `tests/test_orchestrator.py`): the secrets lane no longer hardcodes the
+  `betterleaks` binary — `resolve_secrets_binary()` probes betterleaks-first
+  with gitleaks v8 fallback (same try-next-candidate shape as
+  semgrep/opengrep; flags identical `detect --no-git --source`). Betterleaks
+  stays the primary argv so existing fakes/pins are untouched; gitleaks is
+  retried only when it resolves, and a combined `betterleaks/gitleaks`
+  not-installed error surfaces only when neither binary runs. The
+  `betterleaks` result label and Secret/Match redaction are unchanged.
+  `bravoguard doctor`/`tools` accept either name and report the resolved
+  engine (`secrets via gitleaks`).
+- R1 installer Windows fixes (`feature/bravoguard-remaining-100`,
+  `scripts/install.py` + `tests/test_install.py`): osv-scanner go install uses
+  `github.com/google/osv-scanner/v2/cmd/osv-scanner@latest` (`@v2` is an
+  invalid version query); betterleaks emits a two-step go chain
+  (`github.com/gitleaks/betterleaks@latest`, then
+  `github.com/zricethezav/gitleaks/v8@latest` fallback); scoop/npm
+  candidates are wrapped as `cmd /c ...` on Windows (bare `.cmd` shims fail
+  with WinError 2 under CreateProcess; choco/winget stay bare `.exe`);
+  `execute_plan` now tries candidates in order until one succeeds
+  (RUN/RETRY/OK/FAIL per attempt, FAIL + manual hint only when all fail) so
+  fallbacks actually execute. `go_tag("V2")` kept for other tools; osv uses a
+  hardcoded `@latest` with an invalid-query comment.
 - Linux proof parity (`feature/bravoguard-xplatform-install`): installer dry-run
   test is platform-aware (guarddog `SKIP` asserted on Windows, install plan on
   Linux); `docker/proof-linux.sh` gates `install --check` + `doctor` core-only

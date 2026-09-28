@@ -48,13 +48,14 @@ WINGET_IDS = {
 }
 GO_MODULES = {
     "opengrep": "github.com/opengrep/opengrep",
-    "osv-scanner": "github.com/google/osv-scanner/cmd/osv-scanner",
+    "osv-scanner": "github.com/google/osv-scanner/v2/cmd/osv-scanner",
     "syft": "github.com/anchore/syft",
     "trivy": "github.com/aquasecurity/trivy/cmd/trivy",
     "grype": "github.com/anchore/grype",
     "betterleaks": "github.com/gitleaks/betterleaks",
     "trufflehog": "github.com/trufflesecurity/trufflehog",
 }
+GITLEAKS_V8_MODULE = "github.com/zricethezav/gitleaks/v8"
 BREW_NAMES = {
     "opengrep": "opengrep",
     "osv-scanner": "osv-scanner",
@@ -111,16 +112,32 @@ def go_tag(version: str) -> str:
     return version if version.startswith("v") else f"v{version}"
 
 
+def wrap_win_cmd(cmd: list[str], plat: str) -> list[str]:
+    if plat == "windows" and cmd and cmd[0] in ("scoop", "npm"):
+        return ["cmd", "/c", *cmd]
+    return cmd
+
+
+def candidate_binary(candidate: list[str]) -> str:
+    if len(candidate) >= 3 and candidate[0] == "cmd" and candidate[1] == "/c":
+        return candidate[2]
+    return candidate[0]
+
+
 def binary_candidates(name: str, entry: dict, plat: str) -> tuple[list[list[str]], str]:
     version = entry.get("version", "?")
     if name in NPM_PKGS:
-        return [[["npm", "i", "-g", npm_spec(NPM_PKGS[name], version)]], ""]
+        return [[wrap_win_cmd(["npm", "i", "-g", npm_spec(NPM_PKGS[name], version)], plat)], ""]
     if name == "osv-scanner":
         if plat == "windows":
             cmds = [["winget", "install", "--id", WINGET_IDS[name], "-e"]]
         else:
             cmds = [["brew", "install", BREW_NAMES[name]]]
-        cmds.append(["go", "install", f"{GO_MODULES[name]}@v2"])
+        # NOTE: `go install <module>@v2` is an invalid version query
+        # (go: no matching versions for query "v2"). The v2 layout requires
+        # the /v2 module path with @latest; falls back with NOTE when the
+        # local toolchain is too old.
+        cmds.append(["go", "install", f"{GO_MODULES[name]}@latest"])
         return [cmds, ""]
     if name == "checkov":
         cmds = []
@@ -130,13 +147,31 @@ def binary_candidates(name: str, entry: dict, plat: str) -> tuple[list[list[str]
             cmds.append(["brew", "install", "checkov"])
         cmds += [["pipx", "install", "checkov"], ["uv", "tool", "install", "checkov"]]
         return [cmds, ""]
+    if name == "betterleaks":
+        cmds = []
+        if plat == "windows":
+            if name in WINGET_IDS:
+                cmds.append(["winget", "install", "--id", WINGET_IDS[name], "-e"])
+        elif name in BREW_NAMES:
+            cmds.append(["brew", "install", BREW_NAMES[name]])
+        # NOTE: github.com/gitleaks/betterleaks@latest does not exist
+        # (repository not found). Keep it first, then fall back to gitleaks
+        # v8 (go1.26 satisfies its go1.24 requirement); execute_plan tries
+        # candidates in order until one succeeds.
+        cmds.append(["go", "install", f"{GO_MODULES[name]}@{go_tag(version)}"])
+        cmds.append(["go", "install", f"{GITLEAKS_V8_MODULE}@latest"])
+        manual = ""
+        source = entry.get("source", "")
+        if source.startswith("github:"):
+            manual = f"manual: download {version} from https://github.com/{source[7:]}/releases"
+        return [cmds, manual]
     cmds = []
     if plat == "windows":
         if name in WINGET_IDS:
             cmds.append(["winget", "install", "--id", WINGET_IDS[name], "-e"])
         if name in ("syft", "trivy", "grype", "trufflehog"):
             cmds.append(["choco", "install", name, "-y"])
-            cmds.append(["scoop", "install", name])
+            cmds.append(wrap_win_cmd(["scoop", "install", name], plat))
     elif name in BREW_NAMES:
         cmds.append(["brew", "install", BREW_NAMES[name]])
     if name in GO_MODULES:
@@ -212,13 +247,37 @@ def execute_plan(actions: list[Action]) -> int:
         if a.skipped:
             print(f"SKIP {a.tool}: {a.skip_reason}")
             continue
-        picked = next((c for c in a.candidates if shutil.which(c[0])), a.candidates[0])
-        print(f"RUN {a.tool}=={a.version}: {' '.join(picked)}")
-        try:
-            subprocess.run(picked, check=True, timeout=INSTALL_TIMEOUT)
-            print(f"OK {a.tool}")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
-            print(f"FAIL {a.tool}: {e}")
+        if not a.candidates:
+            print(f"FAIL {a.tool}: no install candidates")
+            if a.manual:
+                print(f"  fallback: {a.manual}")
+            failures += 1
+            continue
+        available = [c for c in a.candidates if shutil.which(candidate_binary(c))]
+        if not available:
+            print(f"FAIL {a.tool}: no candidate manager found")
+            if a.manual:
+                print(f"  fallback: {a.manual}")
+            failures += 1
+            continue
+        print(f"RUN {a.tool}=={a.version}: {' '.join(available[0])}")
+        last_error: Exception | None = None
+        succeeded = False
+        for index, candidate in enumerate(available):
+            if index > 0:
+                print(f"RETRY {a.tool}=={a.version} (attempt {index + 1}): {' '.join(candidate)}")
+            try:
+                subprocess.run(candidate, check=True, timeout=INSTALL_TIMEOUT)
+                print(f"OK {a.tool}")
+                succeeded = True
+                break
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+                last_error = e
+                if index + 1 < len(available):
+                    print(f"RETRY {a.tool}=={a.version}: {' '.join(candidate)} failed ({e}); trying next")
+                continue
+        if not succeeded:
+            print(f"FAIL {a.tool}: {last_error}")
             if a.manual:
                 print(f"  fallback: {a.manual}")
             failures += 1

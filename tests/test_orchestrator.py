@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -282,3 +283,69 @@ def test_scanner_argv_match_manifest_pins() -> None:
         "--source",
         "repo",
     ]
+
+
+def test_secrets_falls_back_to_gitleaks_when_betterleaks_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/local/bin/gitleaks" if name == "gitleaks" else None
+    )
+    assert orchestrator.resolve_secrets_binary() == "gitleaks"
+    calls: list = []
+    leaks = json.dumps(
+        [
+            {
+                "Description": "Generic API Key",
+                "RuleID": "generic-api-key",
+                "File": "app.py",
+                "StartLine": 2,
+                "Secret": "sk-live-abcdef123456",
+                "Match": "api_key = 'sk-live-abcdef123456'",
+            }
+        ]
+    ).encode()
+    responses = quiet_responses(gitleaks=(leaks, 0))
+    del responses["betterleaks"]
+    install_fake(monkeypatch, responses, calls)
+    result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
+    assert "sk-live-abcdef123456" not in json.dumps(result)
+    assert any(f["rule_id"] == "generic-api-key" for f in result["findings"])
+    binaries = {Path(argv[0]).name for argv, _ in calls}
+    assert {"betterleaks", "gitleaks"} <= binaries
+
+
+def test_secrets_both_absent_records_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert orchestrator.resolve_secrets_binary() is None
+    calls: list = []
+    responses = quiet_responses()
+    del responses["betterleaks"]
+    install_fake(monkeypatch, responses, calls)
+    result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
+    assert result["status"] == "ok"
+    assert result["errors"]["betterleaks"] == "not-installed"
+
+
+def test_secrets_argv_flags_identical_for_both_engines() -> None:
+    assert orchestrator.betterleaks_stdin_argv("gitleaks") == [
+        "gitleaks",
+        "detect",
+        "--no-git",
+        "--source",
+        "-",
+    ]
+    assert orchestrator.betterleaks_stdin_argv("gitleaks")[1:] == orchestrator.betterleaks_stdin_argv()[1:]
+    assert orchestrator.betterleaks_path_argv("repo", "gitleaks") == [
+        "gitleaks",
+        "detect",
+        "--no-git",
+        "--source",
+        "repo",
+    ]
+    assert (
+        orchestrator.betterleaks_path_argv("repo", "gitleaks")[1:]
+        == orchestrator.betterleaks_path_argv("repo")[1:]
+    )

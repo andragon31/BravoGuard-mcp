@@ -36,6 +36,15 @@ CORE_BINARIES = ["osv-scanner", "syft", "trivy", "checkov", "betterleaks", "truf
 OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "madge", "jscpd"]
 
 
+def _probe_binary(name: str) -> str | None:
+    """PATH binary satisfying a tool; secrets edge accepts the gitleaks fallback."""
+    if shutil.which(name) is not None:
+        return name
+    if name == "betterleaks" and shutil.which("gitleaks") is not None:
+        return "gitleaks"
+    return None
+
+
 def _tool_version(binary: str) -> str:
     for flag in ("--version", "version", "-V"):
         try:
@@ -95,8 +104,13 @@ def cmd_tools() -> int:
     print(f"{'tool':<14} {'pinned':<12} {'status'}")
     for b in manifest["binaries"]:
         name, pinned = b["name"], b.get("version", "?")
-        ok = shutil.which(name) is not None
-        extra = _tool_version(name) if ok else "MISSING"
+        probed = _probe_binary(name)
+        if probed is None:
+            extra = "MISSING"
+        elif probed != name:
+            extra = f"{_tool_version(probed)} (via {probed} fallback)"
+        else:
+            extra = _tool_version(name)
         print(f"{name:<14} {pinned:<12} {extra}")
     for t in PYTHON_TOOLS:
         ok = shutil.which(t) is not None
@@ -162,8 +176,8 @@ def cmd_doctor(strict: bool = False) -> int:
     else:
         print(f"[ok] rules metadata ({'yaml parsed' if has_yaml else 'text scan'})")
 
-    # 4. Tools on PATH.
-    missing = [t for t in PYTHON_TOOLS + CORE_BINARIES if shutil.which(t) is None]
+    # 4. Tools on PATH (secrets edge: betterleaks or gitleaks v8 fallback).
+    missing = [t for t in PYTHON_TOOLS + CORE_BINARIES if _probe_binary(t) is None]
     if strict:
         missing += [t for t in OPTIONAL_BINARIES if shutil.which(t) is None]
     if missing:
@@ -171,7 +185,8 @@ def cmd_doctor(strict: bool = False) -> int:
         print(f"[fail] missing tools: {missing}")
         print("       fix: pipx/uv-tool for python CLIs, binaries per tools-manifest.json")
     else:
-        print(f"[ok] tools on PATH ({'strict' if strict else 'core'})")
+        secrets = _probe_binary("betterleaks")
+        print(f"[ok] tools on PATH ({'strict' if strict else 'core'}; secrets via {secrets})")
 
     # 5. Cache writable.
     try:
