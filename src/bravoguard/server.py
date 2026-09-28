@@ -19,6 +19,7 @@ import asyncio
 from fastmcp import FastMCP
 
 from bravoguard import orchestrator
+from bravoguard.cache import FindingCache, get_default_cache, make_osv_key
 from bravoguard.normalizer import FINDING_KEYS
 from bravoguard.orchestrator import DEFAULT_TIMEOUT_SECONDS, DIFF_TIMEOUT_SECONDS
 
@@ -29,34 +30,43 @@ OPENGREP_FALLBACK = orchestrator.OPENGREP_FALLBACK
 
 mcp = FastMCP("bravoguard")
 
+# Cache config surface: override with BRAVO_CACHE_PATH; tests pass :memory:.
+CACHE_CONFIG = {"env_var": "BRAVO_CACHE_PATH", "default": ".bravoguard/cache.db"}
+
+
+def _scan_cache() -> FindingCache:
+    return get_default_cache()
+
 
 @mcp.tool()
-async def scan_diff(diff: str) -> dict:
+async def scan_diff(diff: str, cache_ttl: float | None = None) -> dict:
     """Scan an inline unified diff for high-signal issues.
 
     Fans out to `semgrep --config rules/ --json` (or opengrep fallback) +
     bandit + betterleaks stdin via the orchestrator, normalized to FINDING_KEYS.
+    Cache-first (SQLite write-through); empty diffs bypass the cache.
     """
     if not diff.strip():
         return {"status": "empty-diff", "findings": []}
     return await asyncio.wait_for(
-        orchestrator.scan_diff(diff, timeout=DIFF_TIMEOUT_SECONDS),
+        orchestrator.scan_diff(diff, timeout=DIFF_TIMEOUT_SECONDS, cache=_scan_cache(), cache_ttl=cache_ttl),
         timeout=DIFF_TIMEOUT_SECONDS,
     )
 
 
 @mcp.tool()
-async def scan_repo(path: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> dict:
+async def scan_repo(path: str, timeout: int = DEFAULT_TIMEOUT_SECONDS, cache_ttl: float | None = None) -> dict:
     """Scan a local repository checkout and return unified findings.
 
     Orchestrates semgrep/opengrep + bandit + betterleaks with path validation
-    and per-scanner timeouts, normalized to one schema.
+    and per-scanner timeouts, normalized to one schema. Cache-first (SQLite
+    write-through keyed on directory content digest); guard statuses bypass it.
     """
     if not path.strip():
         return {"status": "empty-path", "findings": []}
     budget = timeout if isinstance(timeout, (int, float)) and timeout > 0 else DEFAULT_TIMEOUT_SECONDS
     return await asyncio.wait_for(
-        orchestrator.scan_repo(path, timeout=budget),
+        orchestrator.scan_repo(path, timeout=budget, cache=_scan_cache(), cache_ttl=cache_ttl),
         timeout=budget,
     )
 
@@ -70,6 +80,9 @@ async def osv_lookup(package: str, version: str) -> dict:
     """
     if not package.strip():
         return {"status": "empty-package", "vulns": []}
+    cached = _scan_cache().get(make_osv_key(package.strip(), (version or "").strip()))
+    if cached is not None:
+        return {"status": "ok", "vulns": cached, "cached": True}
     # Real osv-scanner/pip-audit wiring lands in T4; keep the stub explicit.
     return {"status": "not-implemented", "task": f"osv_lookup:{package}@{version}"}
 

@@ -21,6 +21,17 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   (KEV first, then EPSS desc). `orchestrator.py` re-exports the
   parsers and applies dedup plus sort in `_collect`; `server.py` re-exports
   `FINDING_KEYS` from the normalizer.
+- T3 Cache (`src/bravoguard/cache.py` + orchestrator/server wiring): SQLite
+  finding cache (default `.bravoguard/cache.db`, `BRAVO_CACHE_PATH` override,
+  `:memory:` for tests), key `sha256(content-hash + scanner versions from
+  tools-manifest.json + orchestrator engines + DB UpdatedAt/Built + image
+  digest + rule versions)`, optional TTL (default no expiry, `cache_ttl`
+  forwarded from tools). `scan_diff`/`scan_repo` are cache-first with
+  write-through (hits return `cached: True`; empty/invalid guards bypass the
+  cache; `scan_repo` keys on a directory content digest so edits invalidate).
+  `osv_lookup` is cache-first via `make_osv_key` with a `fetcher` hook left
+  for the T4 scanner wiring. Payloads are never logged; cache failures never
+  fail a scan.
 
 ## [0.1.0] — skeleton
 - FastMCP 4 + MCP SDK 2 stdio server with 5 stub tools.

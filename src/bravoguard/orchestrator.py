@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
+
+from bravoguard.cache import FindingCache, make_osv_key, make_scan_key, scanner_fingerprint
 
 from bravoguard.normalizer import (
     FINDING_KEYS,
@@ -287,6 +290,46 @@ def _error_reason(exc: BaseException) -> str:
     return "failed"
 
 
+def _dir_fingerprint(target: Path) -> str:
+    """Best-effort content digest of a repo dir (relpath + size + mtime)."""
+    digest = hashlib.sha256()
+    try:
+        files = sorted(
+            p for p in target.rglob("*") if p.is_file() and ".git" not in p.parts
+        )
+    except OSError:
+        return target.name
+    for path in files[:5000]:
+        try:
+            stat = path.stat()
+            rel = path.relative_to(target).as_posix()
+            digest.update(f"{rel}|{stat.st_size}|{stat.st_mtime_ns}\n".encode("utf-8"))
+        except OSError:
+            continue
+    return digest.hexdigest()
+
+
+def _lookup_scan_cache(cache: FindingCache | None, key: str) -> dict[str, Any] | None:
+    if cache is None:
+        return None
+    try:
+        cached = cache.get(key)
+    except Exception:
+        return None
+    if cached is None:
+        return None
+    return {"status": "ok", "findings": cached, "cached": True}
+
+
+def _store_scan_cache(
+    cache: FindingCache | None, key: str, findings: Any, cache_ttl: float | None
+) -> None:
+    if cache is None or not isinstance(findings, list):
+        return
+    with contextlib.suppress(Exception):
+        cache.put(key, findings, ttl_seconds=cache_ttl)
+
+
 async def _collect(jobs: list[tuple[str, Any]]) -> dict[str, Any]:
     labels = [label for label, _ in jobs]
     results = await asyncio.gather(*[coro for _, coro in jobs], return_exceptions=True)
@@ -304,14 +347,29 @@ async def _collect(jobs: list[tuple[str, Any]]) -> dict[str, Any]:
     return response
 
 
-async def scan_diff(diff: str, timeout: float = DIFF_TIMEOUT_SECONDS) -> dict[str, Any]:
+async def scan_diff(
+    diff: str,
+    timeout: float = DIFF_TIMEOUT_SECONDS,
+    *,
+    cache: FindingCache | None = None,
+    cache_ttl: float | None = None,
+) -> dict[str, Any]:
     """Scan added lines of a unified diff with SAST + bandit + secrets.
 
     Per-scanner ``asyncio.wait_for`` budgets apply (default DIFF 60s); a
     failing scanner is recorded under ``errors`` without failing the scan.
+    Cache-first when ``cache`` is given: hits skip the fan-out and return
+    ``cached: True``; misses write normalized findings through. Empty diffs
+    are never cached.
     """
     if not diff or not diff.strip():
         return {"status": "empty-diff", "findings": []}
+    key = ""
+    if cache is not None:
+        key = make_scan_key(diff, scanner_versions=scanner_fingerprint())
+        hit = _lookup_scan_cache(cache, key)
+        if hit is not None:
+            return hit
     budget = timeout if timeout and timeout > 0 else DIFF_TIMEOUT_SECONDS
     with tempfile.TemporaryDirectory(prefix="bravoguard-diff-") as tmp:
         workdir = Path(tmp)
@@ -321,13 +379,25 @@ async def scan_diff(diff: str, timeout: float = DIFF_TIMEOUT_SECONDS) -> dict[st
             ("bandit", _run_bandit(str(workdir), budget)),
             ("betterleaks", _run_betterleaks_stdin(diff.encode("utf-8"), budget)),
         ]
-        return await _collect(jobs)
+        result = await _collect(jobs)
+    _store_scan_cache(cache, key, result.get("findings"), cache_ttl)
+    return result
 
 
 async def scan_repo(
-    path: str, timeout: float = DEFAULT_TIMEOUT_SECONDS, *, allowed_root: Path | None = None
+    path: str,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    *,
+    allowed_root: Path | None = None,
+    cache: FindingCache | None = None,
+    cache_ttl: float | None = None,
 ) -> dict[str, Any]:
-    """Deep-scan a repo checkout: validate the path, fan out, collect."""
+    """Deep-scan a repo checkout: validate the path, fan out, collect.
+
+    Cache-first when ``cache`` is given, keyed on the directory content
+    digest (relpath + size + mtime) so edits invalidate. Guard statuses
+    (empty/invalid path) are never cached.
+    """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
     budget = timeout if timeout and timeout > 0 else DEFAULT_TIMEOUT_SECONDS
@@ -337,9 +407,63 @@ async def scan_repo(
         return {"status": "invalid-path", "findings": [], "reason": "outside-allowed-root"}
     except FileNotFoundError:
         return {"status": "invalid-path", "findings": [], "reason": "not-found"}
+    key = ""
+    if cache is not None:
+        key = make_scan_key(
+            f"repo:{target}|{_dir_fingerprint(target)}",
+            scanner_versions=scanner_fingerprint(),
+        )
+        hit = _lookup_scan_cache(cache, key)
+        if hit is not None:
+            return hit
     jobs = [
         ("sast", _scan_sast(str(target), budget)),
         ("bandit", _run_bandit(str(target), budget)),
         ("betterleaks", _run_betterleaks_path(str(target), budget)),
     ]
-    return await _collect(jobs)
+    result = await _collect(jobs)
+    _store_scan_cache(cache, key, result.get("findings"), cache_ttl)
+    return result
+
+
+async def osv_lookup(
+    package: str,
+    version: str,
+    *,
+    cache: FindingCache | None = None,
+    db_updated_at: str = "",
+    db_built: str = "",
+    cache_ttl: float | None = None,
+    fetcher: Callable[[str, str], Awaitable[list[dict[str, Any]]]] | None = None,
+) -> dict[str, Any]:
+    """Cache-first OSV hook; the real osv-scanner/pip-audit call lands in T4.
+
+    On a cache hit returns ``{"status": "ok", "vulns": [...], "cached": True}``
+    without invoking ``fetcher``. Without a fetcher (T4 not done) a miss
+    returns the explicit ``not-implemented`` stub. Empty packages are never
+    cached.
+    """
+    if not (package or "").strip():
+        return {"status": "empty-package", "vulns": []}
+    key = ""
+    if cache is not None:
+        key = make_osv_key(
+            package.strip(),
+            (version or "").strip(),
+            scanner_versions=scanner_fingerprint(),
+            db_updated_at=db_updated_at,
+            db_built=db_built,
+        )
+        try:
+            cached = cache.get(key)
+        except Exception:
+            cached = None
+        if cached is not None:
+            return {"status": "ok", "vulns": cached, "cached": True}
+    if fetcher is None:
+        return {"status": "not-implemented", "task": f"osv_lookup:{package}@{version}"}
+    vulns = await fetcher(package, version)
+    if cache is not None and isinstance(vulns, list):
+        with contextlib.suppress(Exception):
+            cache.put(key, vulns, ttl_seconds=cache_ttl)
+    return {"status": "ok", "vulns": vulns}
