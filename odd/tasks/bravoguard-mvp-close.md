@@ -1,0 +1,39 @@
+# Feature: bravoguard-mvp-close
+
+Objective: Close Phase-1 MVP so all five MCP tools return real normalized findings with timeouts, cache, and template fixes.
+Problem: 4 of 5 tools return `not-implemented`; no Orchestrator, Normalizer, or SQLite cache exists.
+Why: PRD exit criteria requires `scan_diff` on seeded vuln -> 1 CWE-mapped finding; smoke lists five tools; no binary without timeout.
+Scope: `src/bravoguard/server.py`, `src/bravoguard/orchestrator.py` (new), `src/bravoguard/normalizer.py` (new), `src/bravoguard/cache.py` (new), `src/bravoguard/suggest.py` (new or templates), `tests/test_*.py`, docs updates alongside behavior. No push/PR/merge overnight.
+Constraints: subprocess-first, `create_subprocess_exec` with argv (never `shell=True`), path validation for `scan_repo`, timeouts enforced (`DIFF 60s`, `DEFAULT 120s`), no secrets logged, offline-first with cache-first `osv_lookup`.
+Authorized scope: Local repo only `C:\Users\Andragon\Documents\Github\BravoGuard-mcp`, branch `feature/bravoguard-mvp-close`. Work-unit commits on this branch are authorized. Push, PR creation, merge deferred to user morning decision. No remote exec, no SSH, no global config changes.
+Acceptance criteria:
+- [ ] `scan_diff` seeded diff -> >=1 finding with CWE mapped to OWASP A05
+- [ ] `tests/test_server_smoke.py` passes without scanner binaries
+- [ ] No scanner invoked without timeout
+- [ ] `osv_lookup` cache-first, `suggest_fix` template-first
+Applicable checks: `uv run pytest -q`, `uv run ruff check src tests`. Parent spot-check re-runs one reported command before delivery.
+TDD: mode off, source default (no project TDD config found, user did not enable), runner `uv run pytest -q`. Ordinary functional checks apply.
+Delivery strategy: `ask-on-risk` (default). Forecast ~1200 authored lines total, ~200-300 per task (advisory only, not a cap). Work-unit commits on feature branch; PR slicing deferred to morning; slice boundaries recorded below.
+Review: RDD on (global on) but OpenCode V2 review transport unavailable, so no reviewer launched overnight. Verification is writer self-verification + parent spot check. Per-task tier/outcome recorded below.
+
+## Tasks
+- [x] T1 (delegated direct — writer trigger: 2+ non-trivial files; preparation trigger: reading pyproject + server.py prepares write so belongs to writer): Orchestrator subprocess real — DONE ses_f19952995ffe2X5h1dGzrq4iX1, 10 tests, 16 passed. Parent spot-check: `uv run pytest -q` 16 passed.
+- [ ] T2 (delegated direct — writer trigger): Normalizer one schema — extend `FINDING_KEYS` with `epss, kev, reachability_note`, parsers for semgrep/opengrep/bandit/betterleaks JSON, dedup by `rule_id+path+line+hash`, EPSS/KEV sort. Tests: parser fixtures + dedup test.
+- [ ] T3 (delegated direct — writer trigger): SQLite cache — key `content-hash + scanner versions + DB UpdatedAt/Built + digest`, `cache-first` for `scan_diff`/`osv_lookup`, write-through. Tests: cache hit/miss + key invalidation.
+- [ ] T4 (delegated direct — writer trigger): `osv_lookup` real + e2e `scan_diff` fixture — osv-scanner/pip-audit JSON + cache, seeded vuln diff -> 1 A05 finding (CWE-79/89/78). Tests: fixture e2e + osv cache test.
+- [ ] T5 (delegated direct — writer trigger): `suggest_fix` templates — `rule_id -> template` table before any LLM fallback, minimal fix suggestion. Tests: template per seed rule + empty-finding guard.
+
+## Progress
+- Branch `feature/bravoguard-mvp-close` created from `master`, clean.
+- T1-T5 pending sequential foreground writers, no parallel writers.
+
+## Verification evidence
+- Base: `master 84ac468`, smoke passes per memory (6 passed earlier, pytest still needs re-run on branch).
+- Per task: writer reports `<command>: <observed result>`; parent spot-checks one command; commit identity recorded here.
+
+## Route declaration
+- T1-T5: delegated direct (writer trigger fired; preparation trigger: reading that prepares write belongs to writer).
+- No SDD artifacts; file count alone never selects SDD.
+
+## Slice boundaries
+- To be recorded per work-unit commit: commit sha, files, authored lines, which PR slice it belongs to (deferred to morning).

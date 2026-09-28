@@ -1,0 +1,447 @@
+"""Subprocess orchestration for BRAVOGuard scanners (Phase 1, T1).
+
+Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
+
+- SAST: ``semgrep --config rules/ --json`` with ``opengrep`` fallback (same args).
+- Python: ``bandit -f json`` over the scan target.
+- Secrets: ``betterleaks detect`` (diff via stdin, repo via path).
+
+Security properties:
+
+- ``asyncio.create_subprocess_exec`` with an argv list; never ``shell=True``.
+- Every scanner call is bounded by ``asyncio.wait_for`` (DIFF 60s, DEFAULT 120s).
+- ``scan_repo`` targets are validated by :func:`resolve_scan_path`.
+- Scanner output is never logged or embedded in errors (it may hold secrets).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import tempfile
+from pathlib import Path
+from typing import Any
+
+DIFF_TIMEOUT_SECONDS = 60
+DEFAULT_TIMEOUT_SECONDS = 120
+
+SEMGREP_ENGINE = "semgrep"
+OPENGREP_FALLBACK = "opengrep"
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RULES_DIR = REPO_ROOT / "rules"
+
+# Unified finding schema (Phase 1 target; T2 extends it with epss/kev data).
+FINDING_KEYS = ("rule_id", "cwe", "path", "line", "severity", "message", "fix_hint")
+
+_BETTERLEAKS_FIX_HINT = "Remove the secret, rotate it, and load it from env or a secret manager."
+
+
+class OrchestratorError(Exception):
+    """Scanner invocation failed (binary name only; never scanner output)."""
+
+
+class ScanPathError(ValueError):
+    """Raised when a scan_repo path fails validation."""
+
+
+class ScannerMissingError(OrchestratorError):
+    """Raised when a scanner binary is not installed."""
+
+    def __init__(self, binary: str) -> None:
+        super().__init__(f"scanner not installed: {binary}")
+        self.binary = binary
+
+
+class ScannerTimeoutError(OrchestratorError):
+    """Raised when a scanner exceeds its timeout budget."""
+
+    def __init__(self, binary: str) -> None:
+        super().__init__(f"scanner timed out: {binary}")
+        self.binary = binary
+
+
+def semgrep_argv(target: str) -> list[str]:
+    """Primary SAST engine: semgrep with the portable rules/ config as JSON."""
+    return [SEMGREP_ENGINE, "--config", str(RULES_DIR), "--json", "--quiet", target]
+
+
+def opengrep_argv(target: str) -> list[str]:
+    """Drop-in fallback: identical args run on the opengrep engine."""
+    return [OPENGREP_FALLBACK, "--config", str(RULES_DIR), "--json", "--quiet", target]
+
+
+def bandit_argv(target: str) -> list[str]:
+    """Python SAST as a recursive JSON report."""
+    return ["bandit", "-f", "json", "-q", "-r", target]
+
+
+def betterleaks_stdin_argv() -> list[str]:
+    """Secrets edge scan reading a diff from stdin (Gitleaks v8-style flags)."""
+    return ["betterleaks", "detect", "--no-git", "--source", "-"]
+
+
+def betterleaks_path_argv(target: str) -> list[str]:
+    """Secrets scan of a repo checkout path."""
+    return ["betterleaks", "detect", "--no-git", "--source", target]
+
+
+async def run_scanner_json(
+    argv: list[str], *, input_data: bytes | None, timeout: float
+) -> dict[str, Any] | list[Any]:
+    """Run one scanner and parse its stdout as JSON.
+
+    Never uses a shell; the whole call is bounded by ``timeout``. Non-zero
+    exits are normal when findings exist, so stdout is parsed regardless of
+    return code. Scanner output is never logged or put into exceptions.
+    """
+    if not argv:
+        raise OrchestratorError("empty scanner argv")
+    binary = argv[0]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE if input_data is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        raise ScannerMissingError(binary) from None
+    except OSError:
+        raise OrchestratorError(f"scanner failed to start: {binary}") from None
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(input_data), timeout)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        with contextlib.suppress(ProcessLookupError, OSError, TimeoutError):
+            await asyncio.wait_for(proc.wait(), 2)
+        raise ScannerTimeoutError(binary) from None
+    if not stdout.strip():
+        if proc.returncode not in (0, 1, None):
+            raise OrchestratorError(f"scanner failed: {binary}")
+        return {}
+    try:
+        return json.loads(stdout.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeError):
+        raise OrchestratorError(f"scanner returned invalid JSON: {binary}") from None
+
+
+def resolve_scan_path(raw_path: str, allowed_root: Path | None = None) -> Path:
+    """Validate a scan_repo target and return its resolved path.
+
+    Absolute paths are accepted when they exist (and, when ``allowed_root``
+    is given, only inside it). Relative paths resolve against
+    ``allowed_root`` (default: repo root) and must stay inside it, so ``..``
+    traversal is rejected.
+    """
+    cleaned = (raw_path or "").strip()
+    if not cleaned:
+        raise ScanPathError("empty scan path")
+    if "\x00" in cleaned:
+        raise ScanPathError("invalid scan path")
+    candidate = Path(cleaned)
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+        if allowed_root is not None and not _inside_root(resolved, allowed_root.resolve()):
+            raise ScanPathError("scan path escapes allowed root")
+    else:
+        root = (allowed_root if allowed_root is not None else REPO_ROOT).resolve()
+        resolved = (root / candidate).resolve()
+        if not _inside_root(resolved, root):
+            raise ScanPathError("scan path escapes allowed root")
+    if not resolved.exists():
+        raise FileNotFoundError(str(resolved))
+    return resolved
+
+
+def _inside_root(resolved: Path, root: Path) -> bool:
+    return resolved == root or resolved.is_relative_to(root)
+
+
+def _finding(
+    rule_id: Any,
+    cwe: Any,
+    path: Any,
+    line: Any,
+    severity: Any,
+    message: Any,
+    fix_hint: Any,
+) -> dict[str, Any]:
+    return {
+        "rule_id": str(rule_id or "unknown"),
+        "cwe": str(cwe or ""),
+        "path": str(path or ""),
+        "line": _safe_line(line),
+        "severity": str(severity or "MEDIUM").upper(),
+        "message": str(message or ""),
+        "fix_hint": str(fix_hint or ""),
+    }
+
+
+def _safe_line(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def normalize_semgrep(payload: Any) -> list[dict[str, Any]]:
+    """Map semgrep/opengrep JSON results to the unified finding shape."""
+    results = payload.get("results", []) if isinstance(payload, dict) else []
+    findings = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+        metadata = extra.get("metadata") if isinstance(extra.get("metadata"), dict) else {}
+        start = item.get("start") if isinstance(item.get("start"), dict) else {}
+        cwe = metadata.get("cwe", "")
+        if isinstance(cwe, list):
+            cwe = cwe[0] if cwe else ""
+        findings.append(
+            _finding(
+                item.get("check_id"),
+                cwe,
+                item.get("path"),
+                start.get("line"),
+                extra.get("severity"),
+                extra.get("message"),
+                metadata.get("fix_hint"),
+            )
+        )
+    return findings
+
+
+def _bandit_cwe(value: Any) -> str:
+    if isinstance(value, dict):
+        value = value.get("id", "")
+    if isinstance(value, int):
+        return f"CWE-{value}"
+    text = str(value or "").strip()
+    if text.isdigit():
+        return f"CWE-{text}"
+    return text.upper() if text.upper().startswith("CWE-") else text
+
+
+def normalize_bandit(payload: Any) -> list[dict[str, Any]]:
+    """Map bandit JSON results to the unified finding shape."""
+    results = payload.get("results", []) if isinstance(payload, dict) else []
+    findings = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        findings.append(
+            _finding(
+                item.get("test_id"),
+                _bandit_cwe(item.get("issue_cwe")),
+                item.get("filename"),
+                item.get("line_number"),
+                item.get("issue_severity"),
+                item.get("issue_text"),
+                "",
+            )
+        )
+    return findings
+
+
+def normalize_betterleaks(payload: Any) -> list[dict[str, Any]]:
+    """Map betterleaks JSON to the unified finding shape.
+
+    Only rule metadata is propagated; Secret/Match values are dropped so
+    live credentials never flow into findings, logs, or errors.
+    """
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        results = payload.get("results", [])
+        items = results if isinstance(results, list) else []
+    else:
+        items = []
+    findings = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        findings.append(
+            _finding(
+                item.get("RuleID"),
+                "CWE-798",
+                item.get("File"),
+                item.get("StartLine"),
+                "HIGH",
+                item.get("Description"),
+                _BETTERLEAKS_FIX_HINT,
+            )
+        )
+    return findings
+
+
+def _diff_target(line: str) -> str | None:
+    """Return the materialized filename for a +++ header line, else None."""
+    if not line.startswith("+++ "):
+        return None
+    target = line[4:].split("\t", 1)[0].strip()
+    if target in ("", "/dev/null", "dev/null"):
+        return None
+    if " " in target:  # added line starting with "++ ", not a header
+        return None
+    if target.startswith("b/"):
+        target = target[2:]
+    name = Path(target).name
+    if not name:
+        return None
+    return name if Path(name).suffix else f"{name}.py"
+
+
+def _unique_filename(name: str, used: set[str]) -> str:
+    if name not in used:
+        used.add(name)
+        return name
+    stem, suffix = Path(name).stem, Path(name).suffix
+    counter = 2
+    while f"{stem}_{counter}{suffix}" in used:
+        counter += 1
+    final = f"{stem}_{counter}{suffix}"
+    used.add(final)
+    return final
+
+
+def materialize_diff_files(diff: str, workdir: Path) -> list[Path]:
+    """Write added diff lines per +++ header into workdir; return files.
+
+    Header-less added lines fall back to ``snippet.py`` so bare pastes still
+    scan. Suffixes come from the diff headers (default ``.py``) so the SAST
+    engines pick the right language rules.
+    """
+    buffers: dict[str, list[str]] = {}
+    order: list[str] = []
+    current: str | None = None
+    pending: list[str] = []
+    for line in diff.splitlines():
+        header = _diff_target(line)
+        if header is not None:
+            current = header
+            if current not in buffers:
+                buffers[current] = []
+                order.append(current)
+            continue
+        if line.startswith("+") and not line.startswith("+++"):
+            if current is None:
+                pending.append(line[1:])
+            else:
+                buffers[current].append(line[1:])
+    if pending:
+        if "snippet.py" not in buffers:
+            buffers["snippet.py"] = []
+            order.append("snippet.py")
+        buffers["snippet.py"].extend(pending)
+    written = []
+    used: set[str] = set()
+    for name in order:
+        target = workdir / _unique_filename(name, used)
+        target.write_text("\n".join(buffers[name]) + "\n", encoding="utf-8")
+        written.append(target)
+    return written
+
+
+async def _scan_sast(target: str, timeout: float) -> tuple[str, Any]:
+    """Run semgrep, falling back to opengrep with identical args."""
+    try:
+        payload = await run_scanner_json(semgrep_argv(target), input_data=None, timeout=timeout)
+        return SEMGREP_ENGINE, payload
+    except ScannerMissingError:
+        payload = await run_scanner_json(opengrep_argv(target), input_data=None, timeout=timeout)
+        return OPENGREP_FALLBACK, payload
+
+
+async def _run_bandit(target: str, timeout: float) -> tuple[str, Any]:
+    payload = await run_scanner_json(bandit_argv(target), input_data=None, timeout=timeout)
+    return "bandit", payload
+
+
+async def _run_betterleaks_stdin(diff_bytes: bytes, timeout: float) -> tuple[str, Any]:
+    payload = await run_scanner_json(
+        betterleaks_stdin_argv(), input_data=diff_bytes, timeout=timeout
+    )
+    return "betterleaks", payload
+
+
+async def _run_betterleaks_path(target: str, timeout: float) -> tuple[str, Any]:
+    payload = await run_scanner_json(
+        betterleaks_path_argv(target), input_data=None, timeout=timeout
+    )
+    return "betterleaks", payload
+
+
+_NORMALIZERS = {
+    "sast": normalize_semgrep,
+    "bandit": normalize_bandit,
+    "betterleaks": normalize_betterleaks,
+}
+
+
+def _error_reason(exc: BaseException) -> str:
+    if isinstance(exc, ScannerTimeoutError):
+        return "timeout"
+    if isinstance(exc, ScannerMissingError):
+        return "not-installed"
+    return "failed"
+
+
+async def _collect(jobs: list[tuple[str, Any]]) -> dict[str, Any]:
+    labels = [label for label, _ in jobs]
+    results = await asyncio.gather(*[coro for _, coro in jobs], return_exceptions=True)
+    findings: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
+    for label, result in zip(labels, results):
+        if isinstance(result, BaseException):
+            errors[label] = _error_reason(result)
+            continue
+        _, payload = result
+        findings.extend(_NORMALIZERS[label](payload))
+    response: dict[str, Any] = {"status": "ok", "findings": findings}
+    if errors:
+        response["errors"] = errors
+    return response
+
+
+async def scan_diff(diff: str, timeout: float = DIFF_TIMEOUT_SECONDS) -> dict[str, Any]:
+    """Scan added lines of a unified diff with SAST + bandit + secrets.
+
+    Per-scanner ``asyncio.wait_for`` budgets apply (default DIFF 60s); a
+    failing scanner is recorded under ``errors`` without failing the scan.
+    """
+    if not diff or not diff.strip():
+        return {"status": "empty-diff", "findings": []}
+    budget = timeout if timeout and timeout > 0 else DIFF_TIMEOUT_SECONDS
+    with tempfile.TemporaryDirectory(prefix="bravoguard-diff-") as tmp:
+        workdir = Path(tmp)
+        materialize_diff_files(diff, workdir)
+        jobs = [
+            ("sast", _scan_sast(str(workdir), budget)),
+            ("bandit", _run_bandit(str(workdir), budget)),
+            ("betterleaks", _run_betterleaks_stdin(diff.encode("utf-8"), budget)),
+        ]
+        return await _collect(jobs)
+
+
+async def scan_repo(
+    path: str, timeout: float = DEFAULT_TIMEOUT_SECONDS, *, allowed_root: Path | None = None
+) -> dict[str, Any]:
+    """Deep-scan a repo checkout: validate the path, fan out, collect."""
+    if not path or not path.strip():
+        return {"status": "empty-path", "findings": []}
+    budget = timeout if timeout and timeout > 0 else DEFAULT_TIMEOUT_SECONDS
+    try:
+        target = resolve_scan_path(path, allowed_root)
+    except ScanPathError:
+        return {"status": "invalid-path", "findings": [], "reason": "outside-allowed-root"}
+    except FileNotFoundError:
+        return {"status": "invalid-path", "findings": [], "reason": "not-found"}
+    jobs = [
+        ("sast", _scan_sast(str(target), budget)),
+        ("bandit", _run_bandit(str(target), budget)),
+        ("betterleaks", _run_betterleaks_path(str(target), budget)),
+    ]
+    return await _collect(jobs)
