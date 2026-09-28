@@ -22,6 +22,7 @@ Helpers:
 from __future__ import annotations
 
 import hashlib
+import math
 from typing import Any
 
 FINDING_KEYS = (
@@ -82,7 +83,7 @@ def _safe_epss(value: Any) -> float | None:
         score = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
-    if score != score:  # NaN
+    if math.isnan(score):
         return None
     return min(1.0, max(0.0, score))
 

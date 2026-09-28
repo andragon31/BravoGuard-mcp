@@ -26,7 +26,7 @@ import sqlite3
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 CACHE_ENV_VAR = "BRAVO_CACHE_PATH"
 IN_MEMORY_PATH = ":memory:"
@@ -42,8 +42,8 @@ _SCHEMA = (
 __all__ = [
     "CACHE_ENV_VAR",
     "DEFAULT_CACHE_FILENAME",
-    "FindingCache",
     "IN_MEMORY_PATH",
+    "FindingCache",
     "content_hash",
     "get",
     "get_default_cache",
@@ -81,7 +81,7 @@ def scanner_fingerprint(manifest_path: Path | None = None) -> str:
         from bravoguard import orchestrator as _orch
 
         engines = f"{_orch.SEMGREP_ENGINE}+{_orch.OPENGREP_FALLBACK}"
-    except Exception:
+    except (ImportError, AttributeError):
         engines = "semgrep+opengrep"
     return f"{engines}|{_manifest_versions(manifest_path)}"
 
@@ -243,7 +243,7 @@ class FindingCache:
             with contextlib.suppress(sqlite3.Error):
                 conn.close()
 
-    def __enter__(self) -> FindingCache:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> None:

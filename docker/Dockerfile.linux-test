@@ -15,17 +15,19 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock tools-manifest.json README.md ./
 COPY src/ ./src/
-RUN uv sync --frozen
+RUN uv sync --frozen --all-extras
 
 COPY tests/ ./tests/
 COPY scripts/ ./scripts/
 COPY rules/ ./rules/
-COPY docker/proof-linux.sh ./docker/proof-linux.sh
+COPY docker/ ./docker/
 
-RUN uv tool install semgrep bandit guarddog pip-audit ruff \
- && go install github.com/google/osv-scanner/cmd/osv-scanner@v2 \
+RUN for pkg in semgrep bandit guarddog pip-audit ruff; do uv tool install "$pkg" || echo "NOTE: uv tool install $pkg failed"; done \
+ && (go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest \
+      || echo "NOTE: osv-scanner go install failed; pip-audit fallback covers OSV") \
  && (go install github.com/gitleaks/betterleaks@latest \
-     || go install github.com/zricethezav/gitleaks/v8@latest) \
+     || go install github.com/zricethezav/gitleaks/v8@latest \
+     || echo "NOTE: secrets go install failed (bookworm go 1.19 too old); lane degrades to not-installed") \
  && (go install github.com/opengrep/opengrep@v1.26.0 \
      || echo "NOTE: opengrep go install failed; semgrep primary covers SAST") \
  && (npm i -g oxlint@1.65.0 \

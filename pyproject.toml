@@ -36,6 +36,13 @@ pythonpath = ["src"]
 target-version = "py311"
 line-length = 100
 
+[tool.ruff.lint]
+# EXE002 cannot pass in the Linux proof: Docker Windows build contexts stamp
+# +x on every COPY'd file (verified: 755 in image, 100644 in git index), and no
+# repo .py file is meant to be executable. File modes stay enforced via git
+# (`git ls-files -s` must show 100644, never 100755).
+ignore = ["EXE002"]
+
 [project.urls]
 Repository = "https://github.com/Andragon/BravoGuard-mcp"
 Issues = "https://github.com/Andragon/BravoGuard-mcp/issues"

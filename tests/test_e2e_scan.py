@@ -195,7 +195,7 @@ def test_empty_guards_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_server_osv_lookup_wired_to_real_fetcher() -> None:
-    import bravoguard.server as server
+    from bravoguard import server
 
     source = inspect.getsource(server)
     assert "fetcher=fetch_osv" in source

@@ -22,11 +22,11 @@ import fnmatch
 import hashlib
 import json
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from bravoguard.cache import FindingCache, make_osv_key, make_scan_key, scanner_fingerprint
-
 from bravoguard.normalizer import (
     FINDING_KEYS,
     normalize_bandit,
@@ -220,8 +220,7 @@ def _diff_target(line: str) -> str | None:
         return None
     if " " in target:  # added line starting with "++ ", not a header
         return None
-    if target.startswith("b/"):
-        target = target[2:]
+    target = target.removeprefix("b/")
     name = Path(target).name
     if not name:
         return None
@@ -368,7 +367,7 @@ def _dir_fingerprint(
             if _is_excluded(rel, excludes):
                 continue
             stat = path.stat()
-            digest.update(f"{rel}|{stat.st_size}|{stat.st_mtime_ns}\n".encode("utf-8"))
+            digest.update(f"{rel}|{stat.st_size}|{stat.st_mtime_ns}\n".encode())
         except OSError:
             continue
     return digest.hexdigest()
@@ -379,7 +378,7 @@ def _lookup_scan_cache(cache: FindingCache | None, key: str) -> dict[str, Any] |
         return None
     try:
         cached = cache.get(key)
-    except Exception:
+    except Exception:  # noqa: BLE001 — cache is best-effort; a bad entry must never fail a scan
         return None
     if cached is None:
         return None
@@ -558,7 +557,7 @@ async def osv_lookup(
         )
         try:
             cached = cache.get(key)
-        except Exception:
+        except Exception:  # noqa: BLE001 — cache is best-effort; a bad entry must never fail a lookup
             cached = None
         if cached is not None:
             return {"status": "ok", "vulns": cached, "cached": True}

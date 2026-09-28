@@ -72,6 +72,15 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   see `docs/DOCKER_PROOF.md`.
 
 ### Fixed
+- Linux proof parity (`feature/bravoguard-xplatform-install`): installer dry-run
+  test is platform-aware (guarddog `SKIP` asserted on Windows, install plan on
+  Linux); `docker/proof-linux.sh` gates `install --check` + `doctor` core-only
+  (PASS when semgrep+bandit+guarddog+pip-audit resolve, optionals missing by
+  design); ruff clean under both 0.15.14 and 0.16.9 (auto-fixable modernizations
+  applied, broad `except` narrowed to realistic failures, intentional
+  never-crash guards documented with `noqa`; `EXE002` ignored repo-wide because
+  Docker Windows build contexts stamp `+x` on every `COPY`'d file while the git
+  index stays `100644`).
 - S1 isolated-scanner setup: `tools-manifest.json` note and
   `scripts/install_external.py` fix hint no longer reference the nonexistent
   `uv sync --extra scanners` path — Python CLIs install isolated

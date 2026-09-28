@@ -223,7 +223,7 @@ def test_diff_without_headers_falls_back_to_snippet(tmp_path: Path) -> None:
 def test_server_delegates_to_orchestrator() -> None:
     import inspect
 
-    import bravoguard.server as server
+    from bravoguard import server
 
     source = inspect.getsource(server)
     assert "_run_with_timeout" not in source

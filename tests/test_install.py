@@ -49,7 +49,11 @@ def test_dry_run_never_mutates(monkeypatch) -> None:
 def test_install_without_yes_lists_guarddog_skip(capsys) -> None:
     assert install.main(["--install"]) == 0
     out = capsys.readouterr().out
-    assert "SKIP guarddog" in out and "--yes" in out
+    assert "--yes" in out
+    if install.detect_platform() == "windows":
+        assert "SKIP guarddog" in out
+    else:
+        assert "guarddog==latest" in out
 
 
 def test_manifest_pins_respected() -> None:

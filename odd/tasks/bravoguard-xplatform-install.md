@@ -18,12 +18,12 @@ Review: RDD on but V2 unavailable, functional + spot check only.
 
 ## Tasks
 - [x] X1 (delegated direct — 2+ files): cross-platform installer — DONE ses_f179d3c18ffe4ywDXqMdkq7Iei, 10 tests, 93 passed. Parent spot-check 93 passed. --check honest partial (6 missing expected).
-- [x] X2 (delegated direct — 2+ files): Docker Linux proof — DONE ses_f1798f778ffe5gBPExqepTpkLK partial honest: artifacts complete (Dockerfile, proof sh, runners ps1/sh, docs, 5 tests), 98 passed. Daemon DOWN, runner exit 2 with start command, no fake pass.
-- [x] X3 (parent inline — bounded verify): dual-env matrix — DONE parent: Windows 98 passed ruff clean, install --check exit 1 honest, docker exit 1 / runner exit 2 blocked with command.
+- [x] X2 (delegated direct — 2+ files): Docker Linux proof — DONE ses_f1798f778ffe5gBPExqepTpkLK + parent fix loop (uv-tool loop, osv v2 path, secrets best-effort, COPY docker/, --all-extras): image builds, Linux proof exit 0 all 6 gates PASS.
+- [x] X3 (parent inline — bounded verify): dual-env matrix — DONE parent: Windows 98 passed ruff clean; Linux container 0 gates failed (pytest, ruff, core check/doctor, seeded real finding, osv). Linux-only fixes: guarddog test platform-aware, EXE002 ignore + ruff hand-fixes, proof core_gate.
 
 ## Progress
-- Branch `feature/bravoguard-xplatform-install` from scanners-100 `9c551b4`. Docker CLI 29.7.2 present, daemon DOWN (pipe missing).
-- X1 pending, X2 pending, X3 pending.
+- Branch `feature/bravoguard-xplatform-install` from scanners-100 `9c551b4`. Docker daemon started by parent, Linux proof GREEN (exit 0).
+- X1+X2+X3 done. Windows 98 passed, Linux 0 gates failed.
 
 ## Verification evidence
 - Base: 83 passed, ruff clean, semgrep/bandit/osv-scanner real Windows.

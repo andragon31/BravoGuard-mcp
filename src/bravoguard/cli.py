@@ -17,7 +17,7 @@ import platform
 import shutil
 import sqlite3
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from bravoguard import __version__
@@ -41,11 +41,11 @@ def _tool_version(binary: str) -> str:
         try:
             import subprocess
 
-            out = subprocess.run([binary, flag], capture_output=True, text=True, timeout=10)
+            out = subprocess.run([binary, flag], capture_output=True, text=True, timeout=10, check=False)
             text = (out.stdout + out.stderr).strip().splitlines()
             if text:
                 return text[0][:120]
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             continue
     return "installed (version unknown)"
 
@@ -56,7 +56,7 @@ def cmd_version(check: bool = False) -> int:
     def dist(v: str) -> str:
         try:
             return md.version(v)
-        except Exception:
+        except ImportError:
             return "not-installed"
 
     print(f"bravoguard {__version__}")
@@ -86,7 +86,7 @@ def fetch_latest_release() -> str | None:
         req = urllib.request.Request(url, headers={"User-Agent": "bravoguard-cli", "Accept": "application/vnd.github+json"})
         with urllib.request.urlopen(req, timeout=10) as r:
             return json.loads(r.read().decode()).get("tag_name")
-    except Exception:
+    except (OSError, ValueError):
         return None
 
 
@@ -126,7 +126,7 @@ def cmd_doctor(strict: bool = False) -> int:
         else:
             failures.append(f"tools mismatch: {sorted(tools)}")
             print(f"[fail] tools mismatch: {sorted(tools)}")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — doctor reports failures, never raises
         failures.append(f"server import: {e}")
         print(f"[fail] server import: {e}")
 
@@ -137,7 +137,7 @@ def cmd_doctor(strict: bool = False) -> int:
         assert explain_cwe("CWE-79")["owasp_2025"] == "A05"
         assert explain_llm("LLM01:2026")["title"] == "Prompt Injection"
         print("[ok] owasp_2025.json + llm_2026.json load (A05 fix verified)")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — doctor reports failures, never raises
         failures.append(f"mapping tables: {e}")
         print(f"[fail] mapping tables: {e}")
 
@@ -147,7 +147,7 @@ def cmd_doctor(strict: bool = False) -> int:
 
         _ = yaml
         has_yaml = True
-    except Exception:
+    except ImportError:
         has_yaml = False
     bad = []
     for y in RULES_DIR.rglob("*.yaml"):
@@ -178,11 +178,11 @@ def cmd_doctor(strict: bool = False) -> int:
         CACHE_DB.parent.mkdir(parents=True, exist_ok=True)
         c = sqlite3.connect(str(CACHE_DB))
         c.execute("CREATE TABLE IF NOT EXISTS _health(id INTEGER PRIMARY KEY, ts TEXT)")
-        c.execute("INSERT INTO _health(ts) VALUES (?)", (datetime.now(timezone.utc).isoformat(),))
+        c.execute("INSERT INTO _health(ts) VALUES (?)", (datetime.now(UTC).isoformat(),))
         c.commit()
         c.close()
         print(f"[ok] cache writable: {CACHE_DB}")
-    except Exception as e:
+    except (sqlite3.Error, OSError) as e:
         failures.append(f"cache: {e}")
         print(f"[fail] cache: {e}")
 
@@ -207,15 +207,15 @@ def cmd_update(check_only: bool = False, yes: bool = False) -> int:
     import subprocess
 
     if CACHE_DB.exists():
-        bak = CACHE_DB.with_suffix(f".bak-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
+        bak = CACHE_DB.with_suffix(f".bak-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}")
         shutil.copy2(CACHE_DB, bak)
         print(f"backup: {CACHE_DB} -> {bak}")
 
     def run(cmd: list[str]) -> int:
         print(f"$ {' '.join(cmd)}")
         try:
-            return subprocess.run(cmd, cwd=str(ROOT), timeout=300).returncode
-        except Exception as e:
+            return subprocess.run(cmd, cwd=str(ROOT), timeout=300, check=False).returncode
+        except (OSError, subprocess.SubprocessError) as e:
             print(f"failed: {e}")
             return 1
 

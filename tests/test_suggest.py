@@ -100,7 +100,7 @@ def test_bravoguard_subprocess_equivalent() -> None:
 
 
 def test_server_suggest_fix_wired_to_templates() -> None:
-    import bravoguard.server as server
+    from bravoguard import server
 
     wired = asyncio.run(server.suggest_fix(_finding("generic-api-key", "CWE-798")))
     assert wired["status"] == "ok"
