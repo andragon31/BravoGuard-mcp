@@ -24,18 +24,23 @@ Review: RDD on (global on) but OpenCode V2 review transport unavailable, so no r
 - [x] T5 (delegated direct — writer trigger): `suggest_fix` templates — DONE ses_f19825af2ffe0EOx45WL9hSou2, 12 tests, 64 passed total. Parent spot-check: `uv run pytest -q` 64 passed, ruff only pre-existing cli.py.
 
 ## Progress
-- Branch `feature/bravoguard-mvp-close` from `master`. T1 8d3996c, T2 7b9a47c, T3 d017b42, T4 cbfb6db, T5 pending commit. All 5 tasks implemented sequential foreground, no parallel writers.
+- Branch `feature/bravoguard-mvp-close` from `master`. T1 8d3996c, T2 7b9a47c, T3 d017b42, T4 cbfb6db, T5 d459d4e. All 5 tasks implemented sequential foreground, no parallel writers. No push/PR/merge (deferred to morning).
 
 ## Verification evidence
 - T1 writer: `uv run pytest -q`: 16 passed; ruff scoped clean (base cli.py F401/F541 pre-existing). Parent: 16 passed.
 - T2: 25 passed. Parent: 25 passed.
 - T3: 39 passed. Parent: 39 passed.
 - T4: 52 passed. Parent: 52 passed.
-- T5 writer: `uv run pytest -q`: 64 passed; ruff touched files clean. Parent: 64 passed, full `ruff check src tests` only pre-existing cli.py (3 errors).
+- T5 writer: `uv run pytest -q`: 64 passed; ruff touched files clean. Parent final: 64 passed, full `ruff check src tests` only pre-existing cli.py (3 errors).
 
 ## Route declaration
 - T1-T5: delegated direct (writer trigger fired; preparation trigger: reading that prepares write belongs to writer).
 - No SDD artifacts; file count alone never selects SDD.
 
 ## Slice boundaries
-- To be recorded per work-unit commit: commit sha, files, authored lines, which PR slice it belongs to (deferred to morning).
+- 8d3996c T1 orchestrator (749 ins, 5 files) — slice 1
+- 7b9a47c T2 normalizer (424 ins) — slice 1
+- d017b42 T3 cache (692 ins) — slice 1
+- cbfb6db T4 osv+e2e (675 ins) — slice 1
+- d459d4e T5 suggest (225 ins) — slice 1
+- PR split deferred to morning; all local on feature/bravoguard-mvp-close, no push.
