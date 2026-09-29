@@ -6,6 +6,18 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
 - Python: ``bandit -f json`` over the scan target.
 - Secrets: ``betterleaks detect`` (diff via stdin, repo via path) with a
   ``gitleaks`` v8 fallback (same flags) when betterleaks is missing.
+- Frontend: ``oxlint <target> --format json`` (M1).
+- Container/IaC: ``trivy fs --format json --scanners vuln,misconfig``
+  (M1; the ``secret`` scanner is excluded on purpose — betterleaks owns
+  secrets, so enabling it would duplicate findings and double-handle live
+  secrets).
+- IaC: ``uv tool run --from checkov checkov -d <target> -o json`` (M1; the
+  bare ``checkov`` shim is broken on Windows, ``uv tool run`` is proven).
+
+``scan_diff`` stays SAST + bandit + secrets: the diff materializer emits
+Python snippets, while oxlint needs JS/TS files, trivy needs manifests /
+lockfiles / IaC, and checkov needs IaC files — repo-scale lanes with no
+diff signal, so wiring them there adds subprocess cost for zero findings.
 
 Security properties:
 
@@ -36,8 +48,41 @@ Exclude enforcement (``exclude`` param, default :data:`DEFAULT_EXCLUDES`):
   pre-filters diff chunks by b-side path before stdin; ``scan_repo`` stages
   a filtered mirror (rel layout preserved, findings paths remapped back) and
   skips the lane entirely when the mirror is empty.
+- oxlint: native repeatable ``--ignore-pattern=PAT`` flags (verified in
+  oxlint 1.65.0 ``--help``; proven live: ``--ignore-pattern bad.js`` drops
+  the file to zero diagnostics). Patterns pass through raw; the
+  engine-side glob dialect is best-effort, same as semgrep.
+- trivy: native ``--skip-dirs`` / ``--skip-files`` (verified in
+  ``trivy filesystem --help``). Trailing-slash dir prefixes become
+  ``--skip-dirs`` values (slash stripped); everything else becomes
+  ``--skip-files``, with bare filenames (no ``/`` or ``*``) prefixed as
+  ``**/name`` so they match at any depth. Best-effort: trivy documents
+  "directories or glob patterns" without pinning basename semantics.
+- checkov: native repeatable ``--skip-path`` (verified in
+  ``checkov --help``: "Path (file or directory) to skip, using regular
+  expression logic ... Can be specified multiple times"). Exclude globs
+  are translated with :func:`fnmatch.translate`, because a raw ``*.wav``
+  is an invalid regex; with ``re.search`` semantics the translated
+  patterns match dir prefixes and basename globs best-effort.
 - An empty post-filter result returns ``ok`` with empty findings; timeouts
   are unchanged; cache keys already include the normalized excludes.
+
+Platform notes (M1, parent-verified env):
+
+- oxlint ships as an ``oxlint.ps1`` shim on Windows, which
+  ``create_subprocess_exec`` cannot spawn directly — on win32 the lane runs
+  ``cmd /c oxlint ...`` (same pattern as the installer R1 fix). POSIX uses
+  the bare ``oxlint`` binary. Flags are identical on both.
+- trivy is a real ``.exe`` on Windows: direct argv on both platforms.
+- checkov runs ONLY as ``uv tool run --from checkov checkov`` (its
+  installed ``.cmd`` shim throws on import even after a clean reinstall).
+  The ``uv`` startup overhead is seconds, inside the 120s budget; when
+  ``uv`` itself is missing the lane degrades to ``not-installed``.
+- trivy downloads its vulnerability DB (~118 MB) plus the checks bundle
+  on first run into the trivy cache dir, then reuses them. First-ever
+  scans are slow (tens of seconds observed); the lane honors its timeout
+  budget and surfaces overruns honestly as ``timeout`` — DB-download
+  slowness is data, not failure.
 """
 
 from __future__ import annotations
@@ -49,6 +94,7 @@ import hashlib
 import json
 import shlex
 import shutil
+import sys
 import tempfile
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -59,8 +105,11 @@ from bravoguard.normalizer import (
     FINDING_KEYS,
     normalize_bandit,
     normalize_betterleaks,
+    normalize_checkov,
     normalize_findings,
+    normalize_oxlint,
     normalize_semgrep,
+    normalize_trivy,
 )
 
 DIFF_TIMEOUT_SECONDS = 60
@@ -70,6 +119,9 @@ SEMGREP_ENGINE = "semgrep"
 OPENGREP_FALLBACK = "opengrep"
 BETTERLEAKS_ENGINE = "betterleaks"
 GITLEAKS_FALLBACK = "gitleaks"
+OXLINT_ENGINE = "oxlint"
+TRIVY_ENGINE = "trivy"
+CHECKOV_ENGINE = "checkov"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
@@ -103,17 +155,23 @@ DEFAULT_EXCLUDES: tuple[str, ...] = (
 
 __all__ = [
     "BETTERLEAKS_ENGINE",
+    "CHECKOV_ENGINE",
     "DEFAULT_EXCLUDES",
     "DEFAULT_TIMEOUT_SECONDS",
     "DIFF_TIMEOUT_SECONDS",
     "FINDING_KEYS",
     "GITLEAKS_FALLBACK",
     "OPENGREP_FALLBACK",
+    "OXLINT_ENGINE",
     "SEMGREP_ENGINE",
+    "TRIVY_ENGINE",
     "normalize_bandit",
     "normalize_betterleaks",
+    "normalize_checkov",
     "normalize_findings",
+    "normalize_oxlint",
     "normalize_semgrep",
+    "normalize_trivy",
     "resolve_secrets_binary",
 ]
 
@@ -223,6 +281,97 @@ def betterleaks_stdin_argv(binary: str = BETTERLEAKS_ENGINE) -> list[str]:
 def betterleaks_path_argv(target: str, binary: str = BETTERLEAKS_ENGINE) -> list[str]:
     """Secrets scan of a repo checkout path (same pin, see above)."""
     return [binary, "detect", "--no-git", "--source", target]
+
+
+def oxlint_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    """Frontend lint as JSON (``-f/--format`` verified in oxlint 1.65.0 ``--help``).
+
+    ``exclude`` patterns become repeatable ``--ignore-pattern=PAT`` flags
+    (``None`` adds no flags). On win32 the lane must run through
+    ``cmd /c`` because oxlint ships as a ``.ps1`` shim that
+    ``create_subprocess_exec`` cannot spawn directly; POSIX uses the bare
+    binary. Flags are identical on both platforms.
+    """
+    argv = [OXLINT_ENGINE, "--format", "json"]
+    argv.extend(f"--ignore-pattern={pattern}" for pattern in dict.fromkeys(exclude or ()))
+    argv.append(target)
+    if sys.platform == "win32":
+        return ["cmd", "/c", *argv]
+    return argv
+
+
+def _trivy_skip_args(patterns: tuple[str, ...]) -> list[str]:
+    """Translate excludes to trivy ``--skip-dirs`` / ``--skip-files`` flags.
+
+    Trailing-slash dir prefixes (``frames/``) become ``--skip-dirs frames``;
+    everything else becomes ``--skip-files``, with bare filenames (no ``/``
+    or ``*``) prefixed as ``**/name`` so they match at any depth. Deduped,
+    repeatable flags (one value per flag); empty input adds no flags.
+    """
+    flags: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        if pattern.endswith("/"):
+            flag, value = "--skip-dirs", pattern.strip("/")
+        elif "/" not in pattern and "*" not in pattern:
+            flag, value = "--skip-files", f"**/{pattern}"
+        else:
+            flag, value = "--skip-files", pattern
+        if value and (flag, value) not in seen:
+            seen.add((flag, value))
+            flags += [flag, value]
+    return flags
+
+
+def trivy_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    """Container/IaC scan as JSON over a filesystem target.
+
+    ``--scanners vuln,misconfig`` (verified in ``trivy filesystem --help``;
+    allowed values ``vuln,misconfig,secret,license``). The ``secret``
+    scanner is deliberately excluded — betterleaks owns secrets. Direct
+    argv on both platforms (trivy is a real ``.exe`` on Windows).
+    """
+    argv = [TRIVY_ENGINE, "fs", "--format", "json", "--scanners", "vuln,misconfig"]
+    argv.extend(_trivy_skip_args(tuple(exclude or ())))
+    argv.append(target)
+    return argv
+
+
+def _checkov_skip_values(patterns: tuple[str, ...]) -> list[str]:
+    """Translate excludes to checkov ``--skip-path`` regex values.
+
+    checkov matches ``--skip-path`` with regex logic, so raw globs like
+    ``*.wav`` would be invalid regexes — each pattern goes through
+    :func:`fnmatch.translate`. Deduped; empty input yields no values.
+    """
+    return [regex for regex in dict.fromkeys(fnmatch.translate(p) for p in patterns)]
+
+
+def checkov_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    """IaC scan as JSON via the isolated checkov install.
+
+    ``uv tool run --from checkov checkov`` is the only working invocation
+    here (the bare ``.cmd`` shim throws on import); ``-d`` / ``-o json`` /
+    ``--quiet`` / ``--compact`` verified in ``checkov --help``. ``exclude``
+    becomes repeatable ``--skip-path`` regex flags (``None`` adds none).
+    """
+    argv = [
+        "uv",
+        "tool",
+        "run",
+        "--from",
+        "checkov",
+        "checkov",
+        "-d",
+        target,
+        "-o",
+        "json",
+        "--quiet",
+        "--compact",
+    ]
+    for regex in _checkov_skip_values(tuple(exclude or ())):
+        argv += ["--skip-path", regex]
+    return argv
 
 
 async def run_scanner_json(
@@ -409,6 +558,37 @@ async def _run_bandit(
     return "bandit", payload
 
 
+async def _run_oxlint(
+    target: str, timeout: float, exclude: tuple[str, ...] = ()
+) -> tuple[str, Any]:
+    """Frontend lane: missing oxlint (or cmd) degrades to not-installed."""
+    payload = await run_scanner_json(
+        oxlint_argv(target, exclude), input_data=None, timeout=timeout
+    )
+    return "oxlint", payload
+
+
+async def _run_trivy(
+    target: str, timeout: float, exclude: tuple[str, ...] = ()
+) -> tuple[str, Any]:
+    """Container/IaC lane: first-ever runs download the vuln DB (slow);
+    overruns surface as timeout via run_scanner_json."""
+    payload = await run_scanner_json(
+        trivy_argv(target, exclude), input_data=None, timeout=timeout
+    )
+    return "trivy", payload
+
+
+async def _run_checkov(
+    target: str, timeout: float, exclude: tuple[str, ...] = ()
+) -> tuple[str, Any]:
+    """IaC lane via ``uv tool run``; missing uv degrades to not-installed."""
+    payload = await run_scanner_json(
+        checkov_argv(target, exclude), input_data=None, timeout=timeout
+    )
+    return "checkov", payload
+
+
 async def _run_secrets_with_fallback(
     primary: list[str], fallback: list[str], *, input_data: bytes | None, timeout: float
 ) -> tuple[str, Any]:
@@ -453,6 +633,9 @@ _NORMALIZERS = {
     "sast": normalize_semgrep,
     "bandit": normalize_bandit,
     "betterleaks": normalize_betterleaks,
+    "oxlint": normalize_oxlint,
+    "trivy": normalize_trivy,
+    "checkov": normalize_checkov,
 }
 
 
@@ -753,8 +936,13 @@ async def scan_repo(
     fully-degraded results (all scanners not-installed) are never cached.
     Every engine enforces ``exclude`` (default :data:`DEFAULT_EXCLUDES`):
     semgrep/opengrep via native ``--exclude``, bandit via native ``-x``,
-    and the secrets lane via a filtered staging mirror (findings paths
-    remapped back; the lane is skipped when the mirror is empty).
+    the secrets lane via a filtered staging mirror (findings paths
+    remapped back; the lane is skipped when the mirror is empty),
+    oxlint via native ``--ignore-pattern``, trivy via native
+    ``--skip-dirs``/``--skip-files``, and checkov via native
+    ``--skip-path`` regexes. Lanes with no applicable files (no JS for
+    oxlint, no manifests/IaC for trivy/checkov) return ``ok`` with empty
+    findings, not errors.
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -788,6 +976,9 @@ async def scan_repo(
             ("sast", _scan_sast(str(target), budget, excludes)),
             ("bandit", _run_bandit(str(target), budget, excludes)),
             ("betterleaks", secrets_job),
+            ("oxlint", _run_oxlint(str(target), budget, excludes)),
+            ("trivy", _run_trivy(str(target), budget, excludes)),
+            ("checkov", _run_checkov(str(target), budget, excludes)),
         ]
         result = await _collect(jobs)
         if staged:

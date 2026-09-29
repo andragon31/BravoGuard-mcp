@@ -77,11 +77,11 @@ async def scan_repo(
 ) -> dict:
     """Scan a local repository checkout and return unified findings.
 
-    Orchestrates semgrep/opengrep + bandit + betterleaks with path validation
-    and per-scanner timeouts, normalized to one schema. Cache-first (SQLite
-    write-through keyed on directory content digest); guard statuses and
-    fully-degraded results bypass it. `exclude` overrides the default
-    media/binary skip list.
+    Orchestrates semgrep/opengrep + bandit + betterleaks + oxlint + trivy
+    + checkov with path validation and per-scanner timeouts, normalized to
+    one schema. Cache-first (SQLite write-through keyed on directory
+    content digest); guard statuses and fully-degraded results bypass it.
+    `exclude` overrides the default media/binary skip list.
     """
     if not path.strip():
         return {"status": "empty-path", "findings": []}

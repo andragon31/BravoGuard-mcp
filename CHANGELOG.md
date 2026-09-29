@@ -6,6 +6,29 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
 ## [Unreleased]
 
 ### Added
+- M1 multi-lane (`feature/bravoguard-multi-lane`, `src/bravoguard/orchestrator.py`
+  + `src/bravoguard/normalizer.py` + `tests/test_lanes.py`): `scan_repo` fans
+  out to three new lanes alongside SAST/bandit/secrets (post-normalization
+  cache reuse unchanged; `scan_diff` stays SAST+secrets — the materializer
+  emits Python snippets while these lanes need JS/TS, manifests, or IaC):
+  oxlint frontend (`oxlint <target> --format json`, `cmd /c` prefix on win32
+  for the `.ps1` shim, native repeatable `--ignore-pattern`, error->MEDIUM /
+  warning->LOW, CWE empty), trivy container/IaC (`trivy fs --format json
+  --scanners vuln,misconfig` — the `secret` scanner stays off because
+  betterleaks owns secrets, native `--skip-dirs`/`--skip-files`, vuln
+  severity passthrough capped CRITICAL->HIGH with first `CweIDs` entry,
+  misconfig `Resolution` -> fix hint), checkov IaC (`uv tool run --from
+  checkov checkov -d <target> -o json --quiet --compact` — the only working
+  invocation here since the bare `.cmd` shim throws on import, native
+  repeatable `--skip-path` with `fnmatch.translate`d globs, missing
+  severity -> MEDIUM, `guideline` URL -> fix hint). Non-applicable targets
+  (no JS, no manifests/IaC) return `ok` with empty findings; missing
+  binaries degrade to `not-installed` without failing the scan. `cli.py`
+  needed no change (`trivy`/`checkov`/`oxlint` already in `CORE_BINARIES`;
+  `tools` stays manifest-driven). Notes: trivy downloads its ~118 MB vuln
+  DB + checks bundle on first run (slow once, then cached; overruns
+  surface honestly as `timeout`); checkov `uv` startup costs seconds
+  inside the 120s budget.
 - T1 Orchestrator (`src/bravoguard/orchestrator.py`): real subprocess fan-out for
   `scan_diff`/`scan_repo` — `asyncio.create_subprocess_exec` with argv lists (never
   `shell=True`), `asyncio.wait_for` budgets (DIFF 60s, DEFAULT 120s), semgrep

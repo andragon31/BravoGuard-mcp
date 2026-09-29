@@ -92,6 +92,12 @@ def quiet_responses(**overrides: object) -> dict:
         "semgrep": (b'{"results": []}', 0),
         "bandit": (b'{"results": []}', 0),
         "betterleaks": (b"[]", 0),
+        # M1 lanes: trivy direct, checkov always via `uv tool run`, oxlint
+        # bare on POSIX but `cmd /c oxlint` on win32 (argv[0] == "cmd").
+        "trivy": (b"{}", 0),
+        "uv": (b'{"results": {"failed_checks": []}}', 0),
+        "oxlint": (b'{"diagnostics": []}', 0),
+        "cmd": (b'{"diagnostics": []}', 0),
     }
     responses.update(overrides)
     return responses

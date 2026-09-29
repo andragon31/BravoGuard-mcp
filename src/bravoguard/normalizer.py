@@ -5,11 +5,23 @@ Single source for the finding schema and all scanner parsers:
 - SAST: semgrep / opengrep JSON (identical shape, same parser).
 - Python: bandit JSON.
 - Secrets: betterleaks JSON (Secret/Match values are never read).
+- Frontend: oxlint ``--format json`` (``diagnostics`` list).
+- Container/IaC: trivy ``fs --format json`` (``Results`` list).
+- IaC: checkov ``-o json`` (``results.failed_checks``).
 
 Schema (``FINDING_KEYS``): ``rule_id, cwe, path, line, severity, message,
 fix_hint, epss, kev, reachability_note``. ``epss`` is a float in [0, 1] or
 ``None`` when unknown; ``kev`` is a bool; ``reachability_note`` is free text
 (empty when unknown).
+
+Severity honesty (M1 multi-lane): engines without exploit context never emit
+CRITICAL on their own authority. oxlint maps ``error`` -> MEDIUM and
+everything else -> LOW (lint signal, no CVE, never above MEDIUM); trivy
+and checkov pass their feed severity through but cap CRITICAL -> HIGH
+and default blanks to MEDIUM (checkov omits ``severity`` for many graph
+checks). ``cwe`` is ``""`` where the engine carries no mapping (oxlint
+diagnostics, checkov checks, trivy entries without ``CweIDs``); trivy
+uses the first ``CweIDs`` entry when present.
 
 Helpers:
 
@@ -191,6 +203,154 @@ def normalize_betterleaks(payload: Any) -> list[dict[str, Any]]:
                 BETTERLEAKS_FIX_HINT,
             )
         )
+    return findings
+
+
+def _oxlint_severity(value: Any) -> str:
+    """oxlint ``error`` -> MEDIUM, anything else (``warning``) -> LOW.
+
+    Lint findings carry no CVE, so they never escalate above MEDIUM.
+    """
+    return "MEDIUM" if str(value or "").lower() == "error" else "LOW"
+
+
+def _oxlint_line(item: dict[str, Any]) -> int:
+    labels = item.get("labels")
+    if isinstance(labels, list) and labels:
+        first = labels[0]
+        if isinstance(first, dict):
+            span = first.get("span")
+            if isinstance(span, dict):
+                return _safe_line(span.get("line"))
+    return 0
+
+
+def normalize_oxlint(payload: Any) -> list[dict[str, Any]]:
+    """Map oxlint ``--format json`` diagnostics to the unified shape.
+
+    Real shape (oxlint 1.65.0, verified live): ``{"diagnostics": [{message,
+    code, severity, help, filename, labels: [{span: {line, column}}]}]}``.
+    Rules become ``oxlint-<code>``; ``help`` becomes the fix hint; ``cwe``
+    stays empty (lint codes do not map to CWEs).
+    """
+    items = payload.get("diagnostics", []) if isinstance(payload, dict) else []
+    findings = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        findings.append(
+            make_finding(
+                f"oxlint-{item.get('code', 'unknown')}",
+                "",
+                item.get("filename"),
+                _oxlint_line(item),
+                _oxlint_severity(item.get("severity")),
+                item.get("message"),
+                item.get("help"),
+            )
+        )
+    return findings
+
+
+def _capped_severity(value: Any) -> str:
+    """Uppercase passthrough capped at HIGH (CRITICAL -> HIGH).
+
+    Trivy/checkov severities are engine-assigned without exploit context,
+    so CRITICAL is capped; blanks default to MEDIUM.
+    """
+    severity = str(value or "MEDIUM").upper()
+    return "HIGH" if severity == "CRITICAL" else severity
+
+
+def normalize_trivy(payload: Any) -> list[dict[str, Any]]:
+    """Map trivy ``fs --format json`` Results to the unified shape.
+
+    Real shape (trivy 0.74.0, verified live): ``{"Results": [{Target,
+    Vulnerabilities: [{VulnerabilityID, PkgName, InstalledVersion,
+    FixedVersion, Severity, Title, CweIDs[], PrimaryURL}],
+    Misconfigurations: [{ID, Title, Message, Resolution, Severity,
+    CauseMetadata: {StartLine}}]}]}``. Missing ``Results`` (clean target)
+    yields no findings. Vuln rules are ``trivy-<VulnerabilityID>`` with the
+    first ``CweIDs`` entry (else empty); misconfig rules are
+    ``trivy-<ID>`` with ``Resolution`` as the fix hint.
+    """
+    results = payload.get("Results", []) if isinstance(payload, dict) else []
+    findings = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        target = result.get("Target", "")
+        for vuln in result.get("Vulnerabilities") or []:
+            if not isinstance(vuln, dict):
+                continue
+            cwe_ids = vuln.get("CweIDs") or []
+            package = vuln.get("PkgName", "")
+            installed = vuln.get("InstalledVersion", "")
+            fixed = vuln.get("FixedVersion", "")
+            hint = f"Upgrade {package} {installed} to {fixed}." if fixed else ""
+            findings.append(
+                make_finding(
+                    f"trivy-{vuln.get('VulnerabilityID', 'unknown')}",
+                    _cwe_text(cwe_ids[0]) if cwe_ids else "",
+                    target,
+                    0,
+                    _capped_severity(vuln.get("Severity")),
+                    vuln.get("Title") or vuln.get("Description"),
+                    hint,
+                )
+            )
+        for misconfig in result.get("Misconfigurations") or []:
+            if not isinstance(misconfig, dict):
+                continue
+            cause = misconfig.get("CauseMetadata")
+            line = cause.get("StartLine") if isinstance(cause, dict) else 0
+            findings.append(
+                make_finding(
+                    f"trivy-{misconfig.get('ID', 'unknown')}",
+                    "",
+                    target,
+                    line,
+                    _capped_severity(misconfig.get("Severity")),
+                    misconfig.get("Title") or misconfig.get("Message"),
+                    misconfig.get("Resolution"),
+                )
+            )
+    return findings
+
+
+def normalize_checkov(payload: Any) -> list[dict[str, Any]]:
+    """Map checkov ``-o json`` failed_checks to the unified shape.
+
+    Real shape (checkov 3.3.20, verified live): ``{"check_type": ...,
+    "results": {"failed_checks": [{check_id, check_name, file_abs_path,
+    file_line_range: [start, end], severity (often null), guideline}]}}``.
+    Non-IaC targets return a summary-only payload without ``results`` (no
+    findings, not an error); a list payload (multi-framework runs) is
+    accepted too. Rules are ``checkov-<check_id>``; ``guideline`` (docs URL)
+    becomes the fix hint; ``cwe`` stays empty (checks do not carry CWEs).
+    """
+    items = payload if isinstance(payload, list) else [payload]
+    findings = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        results = entry.get("results")
+        failed = results.get("failed_checks", []) if isinstance(results, dict) else []
+        for check in failed:
+            if not isinstance(check, dict):
+                continue
+            line_range = check.get("file_line_range") or [0]
+            findings.append(
+                make_finding(
+                    f"checkov-{check.get('check_id', 'unknown')}",
+                    "",
+                    check.get("file_abs_path") or check.get("file_path"),
+                    line_range[0] if isinstance(line_range, list) else 0,
+                    _capped_severity(check.get("severity")),
+                    check.get("check_name"),
+                    check.get("guideline"),
+                )
+            )
     return findings
 
 
