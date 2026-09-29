@@ -72,6 +72,28 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   see `docs/DOCKER_PROOF.md`.
 
 ### Fixed
+- E1 engine-side `exclude` enforcement (`feature/bravoguard-exclude-fix`,
+  `src/bravoguard/orchestrator.py` + `tests/test_exclude.py`): `exclude`
+  (default `DEFAULT_EXCLUDES`, now including `.venv/`) previously affected
+  only the fingerprint/materializer/cache-key while bandit/semgrep/secrets
+  scanned the whole target (dogfood: 3242 findings, 2505x B101 from `.venv`
+  deps). Now every engine enforces it in both `scan_repo` and `scan_diff`:
+  semgrep/opengrep via native repeatable `--exclude=PATTERN` (spelling
+  verified against semgrep 1.178 `scan --help`); bandit via native `-x`
+  comma list (verified in bandit 1.9.4 `--help`) with pattern translation
+  (`frames/` -> `*/frames/*`, bare `skip.py` -> `*/skip.py`, proven live:
+  translated `-x` drops `.venv/evil.py` while raw `.venv/` does not);
+  secrets (betterleaks/gitleaks have no native path-exclude flag per
+  `gitleaks detect --help`) via pre-filter — `scan_diff` filters diff
+  chunks by b-side path before stdin, `scan_repo` stages a filtered mirror
+  (rel layout preserved, findings paths remapped, lane skipped when empty).
+  `_is_excluded` stays the single matcher (fnmatch on rel-posix path, on
+  `"/" + rel-posix` so `*/.venv/*` matches top-level `.venv/...`, and on
+  basename; trailing `/` = dir prefix) and is now also checked against the
+  full `diff --git` b-side path in the materializer. Empty-after-filter
+  returns `ok` with empty findings; timeouts, cache keys, and default argv
+  shapes are unchanged. Live proof: repo scan of a tmp tree reports B101
+  only for `src/ok.py`, zero `.venv` findings.
 - R2 secrets-edge fallback (`feature/bravoguard-remaining-100`,
   `src/bravoguard/orchestrator.py` + `src/bravoguard/cli.py` +
   `tests/test_orchestrator.py`): the secrets lane no longer hardcodes the

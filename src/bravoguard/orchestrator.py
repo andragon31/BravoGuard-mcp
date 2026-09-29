@@ -13,6 +13,31 @@ Security properties:
 - Every scanner call is bounded by ``asyncio.wait_for`` (DIFF 60s, DEFAULT 120s).
 - ``scan_repo`` targets are validated by :func:`resolve_scan_path`.
 - Scanner output is never logged or embedded in errors (it may hold secrets).
+
+Exclude enforcement (``exclude`` param, default :data:`DEFAULT_EXCLUDES`):
+
+- Pattern syntax (single matcher :func:`_is_excluded`): fnmatch against the
+  rel-posix path, against ``"/" + rel-posix`` (so a leading ``*/`` also
+  matches top-level paths — ``*/.venv/*`` matches ``.venv/x.py``), and
+  against the basename. A trailing ``/`` means dir prefix (``frames/``
+  matches ``frames/clip.mp4``).
+- SAST (semgrep/opengrep): native repeatable ``--exclude=PATTERN`` flags
+  (verified against semgrep 1.178 ``scan --help``; opengrep keeps identical
+  args). Patterns pass through raw; engine-side glob dialect is gitignore
+  style, so exotic shapes are best-effort there.
+- Bandit: native ``-x`` comma list (verified in bandit 1.9.4 ``--help``:
+  ``-x EXCLUDED_PATHS``, glob patterns supported). Bandit matches against
+  absolute paths and ignores trailing-slash dir prefixes, so patterns are
+  translated: ``frames/`` -> ``*/frames/*``, bare ``skip.py`` ->
+  ``*/skip.py``; wildcards pass through raw.
+- Secrets (betterleaks/gitleaks): neither engine has a native path-exclude
+  flag (verified in ``gitleaks detect --help``; betterleaks was absent so it
+  is treated as gitleaks-compatible per tools-manifest.json). ``scan_diff``
+  pre-filters diff chunks by b-side path before stdin; ``scan_repo`` stages
+  a filtered mirror (rel layout preserved, findings paths remapped back) and
+  skips the lane entirely when the mirror is empty.
+- An empty post-filter result returns ``ok`` with empty findings; timeouts
+  are unchanged; cache keys already include the normalized excludes.
 """
 
 from __future__ import annotations
@@ -22,6 +47,7 @@ import contextlib
 import fnmatch
 import hashlib
 import json
+import shlex
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -52,6 +78,7 @@ RULES_DIR = REPO_ROOT / "rules"
 # fingerprint and the diff materializer (real-project scans exclude them so
 # media churn never invalidates the cache). `.git` is always excluded.
 DEFAULT_EXCLUDES: tuple[str, ...] = (
+    ".venv/",
     "frames/",
     "projects/",
     "*.wav",
@@ -115,19 +142,58 @@ class ScannerTimeoutError(OrchestratorError):
         self.binary = binary
 
 
-def semgrep_argv(target: str) -> list[str]:
-    """Primary SAST engine: semgrep with the portable rules/ config as JSON."""
-    return [SEMGREP_ENGINE, "--config", str(RULES_DIR), "--json", "--quiet", target]
+def semgrep_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    """Primary SAST engine: semgrep with the portable rules/ config as JSON.
+
+    ``exclude`` patterns become repeatable ``--exclude=PATTERN`` flags
+    (``None`` adds no flags; callers pass normalized excludes explicitly).
+    """
+    argv = [SEMGREP_ENGINE, "--config", str(RULES_DIR), "--json", "--quiet"]
+    argv.extend(f"--exclude={pattern}" for pattern in dict.fromkeys(exclude or ()))
+    argv.append(target)
+    return argv
 
 
-def opengrep_argv(target: str) -> list[str]:
+def opengrep_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
     """Drop-in fallback: identical args run on the opengrep engine."""
-    return [OPENGREP_FALLBACK, "--config", str(RULES_DIR), "--json", "--quiet", target]
+    argv = [OPENGREP_FALLBACK, "--config", str(RULES_DIR), "--json", "--quiet"]
+    argv.extend(f"--exclude={pattern}" for pattern in dict.fromkeys(exclude or ()))
+    argv.append(target)
+    return argv
 
 
-def bandit_argv(target: str) -> list[str]:
-    """Python SAST as a recursive JSON report."""
-    return ["bandit", "-f", "json", "-q", "-r", target]
+def _bandit_exclude_value(patterns: tuple[str, ...]) -> str | None:
+    """Translate excludes to bandit's ``-x`` dialect (absolute-path matching).
+
+    Trailing-slash dir prefixes (ignored by bandit) become ``*/dir/*`` and
+    bare filenames (never matching absolute paths) become ``*/name``;
+    wildcard patterns pass through raw. Deduped, comma-joined, ``None`` when
+    empty.
+    """
+    translated: list[str] = []
+    for pattern in patterns:
+        if pattern.endswith("/"):
+            candidate = f"*/{pattern.strip('/')}/*"
+        elif "/" not in pattern and not pattern.startswith("*"):
+            candidate = f"*/{pattern}"
+        else:
+            candidate = pattern
+        if candidate not in translated:
+            translated.append(candidate)
+    return ",".join(translated) if translated else None
+
+
+def bandit_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
+    """Python SAST as a recursive JSON report.
+
+    ``exclude`` becomes a native ``-x`` comma list (``None`` adds no flags;
+    callers pass normalized excludes explicitly).
+    """
+    argv = ["bandit", "-f", "json", "-q", "-r", target]
+    value = _bandit_exclude_value(tuple(exclude or ()))
+    if value is not None:
+        argv += ["-x", value]
+    return argv
 
 
 def resolve_secrets_binary() -> str | None:
@@ -269,20 +335,29 @@ def materialize_diff_files(
     Header-less added lines fall back to ``snippet.py`` so bare pastes still
     scan. Suffixes come from the diff headers (default ``.py``) so the SAST
     engines pick the right language rules. Files matching ``exclude``
-    (default :data:`DEFAULT_EXCLUDES`) are skipped.
+    (default :data:`DEFAULT_EXCLUDES`) are skipped, checking both the
+    materialized basename and the full ``diff --git`` b-side path (so
+    ``*/.venv/*`` drops ``.venv/evil.py`` even though it materializes as
+    ``evil.py``).
     """
     excludes = _normalize_excludes(exclude)
     buffers: dict[str, list[str]] = {}
+    b_paths: dict[str, str | None] = {}
     order: list[str] = []
     current: str | None = None
+    current_b: str | None = None
     pending: list[str] = []
     for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            current_b = _git_b_path(line)
+            continue
         header = _diff_target(line)
         if header is not None:
             current = header
             if current not in buffers:
                 buffers[current] = []
                 order.append(current)
+                b_paths[current] = current_b
             continue
         if line.startswith("+") and not line.startswith("+++"):
             if current is None:
@@ -293,11 +368,15 @@ def materialize_diff_files(
         if "snippet.py" not in buffers:
             buffers["snippet.py"] = []
             order.append("snippet.py")
+            b_paths["snippet.py"] = None
         buffers["snippet.py"].extend(pending)
     written = []
     used: set[str] = set()
     for name in order:
         if _is_excluded(name, excludes):
+            continue
+        b_path = b_paths.get(name)
+        if b_path is not None and _is_excluded(b_path, excludes):
             continue
         target = workdir / _unique_filename(name, used)
         target.write_text("\n".join(buffers[name]) + "\n", encoding="utf-8")
@@ -305,18 +384,28 @@ def materialize_diff_files(
     return written
 
 
-async def _scan_sast(target: str, timeout: float) -> tuple[str, Any]:
+async def _scan_sast(
+    target: str, timeout: float, exclude: tuple[str, ...] = ()
+) -> tuple[str, Any]:
     """Run semgrep, falling back to opengrep with identical args."""
     try:
-        payload = await run_scanner_json(semgrep_argv(target), input_data=None, timeout=timeout)
+        payload = await run_scanner_json(
+            semgrep_argv(target, exclude), input_data=None, timeout=timeout
+        )
         return SEMGREP_ENGINE, payload
     except ScannerMissingError:
-        payload = await run_scanner_json(opengrep_argv(target), input_data=None, timeout=timeout)
+        payload = await run_scanner_json(
+            opengrep_argv(target, exclude), input_data=None, timeout=timeout
+        )
         return OPENGREP_FALLBACK, payload
 
 
-async def _run_bandit(target: str, timeout: float) -> tuple[str, Any]:
-    payload = await run_scanner_json(bandit_argv(target), input_data=None, timeout=timeout)
+async def _run_bandit(
+    target: str, timeout: float, exclude: tuple[str, ...] = ()
+) -> tuple[str, Any]:
+    payload = await run_scanner_json(
+        bandit_argv(target, exclude), input_data=None, timeout=timeout
+    )
     return "bandit", payload
 
 
@@ -387,11 +476,122 @@ def _is_excluded(rel_posix: str, patterns: tuple[str, ...]) -> bool:
             prefix = pattern.rstrip("/")
             if rel_posix == prefix or rel_posix.startswith(pattern):
                 return True
-        elif fnmatch.fnmatch(rel_posix, pattern) or fnmatch.fnmatch(
-            Path(rel_posix).name, pattern
+        elif (
+            fnmatch.fnmatch(rel_posix, pattern)
+            or fnmatch.fnmatch("/" + rel_posix, pattern)
+            or fnmatch.fnmatch(Path(rel_posix).name, pattern)
         ):
             return True
     return False
+
+
+def _git_b_path(line: str) -> str | None:
+    """Return the b-side path of a ``diff --git a/x b/y`` line, else None."""
+    try:
+        sides = shlex.split(line[len("diff --git ") :])
+    except ValueError:
+        sides = line.split()
+    for side in reversed(sides):
+        cleaned = side.strip().strip("\"'")
+        if cleaned.startswith("b/"):
+            return cleaned[2:]
+    return None
+
+
+def _chunk_b_path(chunk: list[str]) -> str | None:
+    """Return the b-side path of a ``diff --git`` chunk, else None (keep)."""
+    b_path = _git_b_path(chunk[0])
+    if b_path is not None:
+        return b_path
+    for line in chunk[1:]:
+        if line.startswith("+++ ") and "/dev/null" not in line:
+            target = line[4:].split("\t", 1)[0].strip().strip("\"'")
+            return target.removeprefix("b/")
+    return None
+
+
+def _filter_diff(diff: str, excludes: tuple[str, ...]) -> str:
+    """Drop per-file chunks whose b-side path matches ``excludes``.
+
+    Preamble lines and chunks with no parseable path are kept, so unusual
+    diffs degrade to the old unfiltered behavior instead of losing content.
+    """
+    preamble: list[str] = []
+    chunks: list[list[str]] = []
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            chunks.append([line])
+        elif not chunks:
+            preamble.append(line)
+        else:
+            chunks[-1].append(line)
+    kept = list(preamble)
+    for chunk in chunks:
+        path = _chunk_b_path(chunk)
+        if path is not None and _is_excluded(path, excludes):
+            continue
+        kept.extend(chunk)
+    text = "\n".join(kept)
+    if diff.endswith("\n") and text and not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+async def _empty_secrets_result() -> tuple[str, Any]:
+    """Secrets-lane stand-in when pre-filtering removed every input file."""
+    return "betterleaks", []
+
+
+def _stage_filtered_tree(target: Path, excludes: tuple[str, ...], staging: Path) -> int:
+    """Mirror non-excluded files of ``target`` into ``staging`` (rel layout).
+
+    The secrets engines take a directory with no native exclude flag, so
+    they scan this mirror instead of the raw checkout; findings paths are
+    remapped by :func:`_remap_staged_path`. ``.git`` is always skipped.
+    Returns the staged file count (0 means the lane is skipped).
+    """
+    candidates: list[tuple[str, Path]] = []
+    if target.is_file():
+        candidates.append((target.name, target))
+    else:
+        try:
+            files = sorted(
+                p for p in target.rglob("*") if p.is_file() and ".git" not in p.parts
+            )
+        except OSError:
+            return 0
+        for path in files:
+            try:
+                rel = path.relative_to(target).as_posix()
+            except (OSError, ValueError):
+                continue
+            candidates.append((rel, path))
+    staged = 0
+    for rel, path in candidates:
+        if _is_excluded(rel, excludes):
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        dest = staging / rel
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+        except OSError:
+            continue
+        staged += 1
+    return staged
+
+
+def _remap_staged_path(path: str, staging: Path, target: Path) -> str:
+    """Map a findings path inside the secrets staging mirror back to ``target``."""
+    for prefix in (str(staging), str(staging).replace("\\", "/")):
+        if path == prefix:
+            return str(target)
+        if path.startswith((prefix + "/", prefix + "\\")):
+            return str(target / path[len(prefix) + 1 :])
+    return path
 
 
 def _dir_fingerprint(
@@ -499,7 +699,9 @@ async def scan_diff(
     ``cached: True`` (with stored ``errors`` when present); misses write
     normalized findings through. Empty diffs are never cached, and neither
     are fully-degraded results (all scanners not-installed). Files matching
-    ``exclude`` (default :data:`DEFAULT_EXCLUDES`) are never materialized.
+    ``exclude`` (default :data:`DEFAULT_EXCLUDES`) are never materialized,
+    and the secrets lane reads the exclude-filtered diff (skipped entirely
+    when nothing survives the filter).
     """
     if not diff or not diff.strip():
         return {"status": "empty-diff", "findings": []}
@@ -517,10 +719,16 @@ async def scan_diff(
     with tempfile.TemporaryDirectory(prefix="bravoguard-diff-") as tmp:
         workdir = Path(tmp)
         materialize_diff_files(diff, workdir, excludes)
+        filtered = _filter_diff(diff, excludes)
+        secrets_job = (
+            _run_betterleaks_stdin(filtered.encode("utf-8"), budget)
+            if filtered.strip()
+            else _empty_secrets_result()
+        )
         jobs = [
-            ("sast", _scan_sast(str(workdir), budget)),
-            ("bandit", _run_bandit(str(workdir), budget)),
-            ("betterleaks", _run_betterleaks_stdin(diff.encode("utf-8"), budget)),
+            ("sast", _scan_sast(str(workdir), budget, excludes)),
+            ("bandit", _run_bandit(str(workdir), budget, excludes)),
+            ("betterleaks", secrets_job),
         ]
         result = await _collect(jobs)
     if not _is_fully_degraded(result, len(jobs)):
@@ -543,6 +751,10 @@ async def scan_repo(
     digest (relpath + size + mtime, minus ``exclude``) so edits invalidate
     while media churn does not. Guard statuses (empty/invalid path) and
     fully-degraded results (all scanners not-installed) are never cached.
+    Every engine enforces ``exclude`` (default :data:`DEFAULT_EXCLUDES`):
+    semgrep/opengrep via native ``--exclude``, bandit via native ``-x``,
+    and the secrets lane via a filtered staging mirror (findings paths
+    remapped back; the lane is skipped when the mirror is empty).
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -564,12 +776,26 @@ async def scan_repo(
         hit = _lookup_scan_cache(cache, key)
         if hit is not None:
             return hit
-    jobs = [
-        ("sast", _scan_sast(str(target), budget)),
-        ("bandit", _run_bandit(str(target), budget)),
-        ("betterleaks", _run_betterleaks_path(str(target), budget)),
-    ]
-    result = await _collect(jobs)
+    with tempfile.TemporaryDirectory(prefix="bravoguard-secrets-") as stage_tmp:
+        staging = Path(stage_tmp)
+        staged = _stage_filtered_tree(target, excludes, staging)
+        secrets_job = (
+            _run_betterleaks_path(str(staging), budget)
+            if staged
+            else _empty_secrets_result()
+        )
+        jobs = [
+            ("sast", _scan_sast(str(target), budget, excludes)),
+            ("bandit", _run_bandit(str(target), budget, excludes)),
+            ("betterleaks", secrets_job),
+        ]
+        result = await _collect(jobs)
+        if staged:
+            for finding in result.get("findings", []):
+                if isinstance(finding, dict) and finding.get("path"):
+                    finding["path"] = _remap_staged_path(
+                        str(finding["path"]), staging, target
+                    )
     if not _is_fully_degraded(result, len(jobs)):
         _store_scan_cache(cache, key, result.get("findings"), cache_ttl, result.get("errors"))
     return result
