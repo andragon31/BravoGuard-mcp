@@ -10,7 +10,7 @@ Acceptance criteria:
 - [x] scan_diff with real eval/innerHTML diff returns ok with semgrep+bandid findings via MCP (no transport throw) — REOPENED: MCP re-proof shows semgrep silent (0 findings) while bandit fires; root cause: materialized tree under gitignored `.bravoguard/tmp/` is skipped by semgrep's git-aware targeting. Fix: explicit file args in scan_diff SAST invocation.
 - [x] Materializer uses repo-local base when writable, %TEMP% fallback otherwise; cleanup verified — mkdtemp under base + finally rmtree, tests incl. hanging-fake
 - [x] `uv run pytest -q` green + ruff clean — 153 passed, clean
-- [x] L3: scan_diff passes explicit materialized file list to semgrep/opengrep (bypasses gitignore-skip) — DONE locally (writer live hit); MCP re-proof outstanding (needs server reload, next step)
+- [x] L3: scan_diff passes explicit materialized file list to semgrep/opengrep (bypasses gitignore-skip) — DONE locally + MCP re-proof HIT (`rules.frontend.bravoguard-frontend-dangerous-html` via transport). Caveat found: scan cache key lacks code version — first MCP probe returned pre-L3 cached result; fresh diff proves new code. Known gap, not fixed here.
 Applicable checks: `uv run pytest -q`, `uv run ruff check src/bravoguard tests`.
 TDD: off, runner `uv run pytest -q`.
 Delivery: `ask-on-risk`. Forecast <150 lines. Work-unit commits; PR deferred.
