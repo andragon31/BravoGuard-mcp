@@ -296,7 +296,7 @@ def test_scan_diff_empty_after_filter_ok(monkeypatch: pytest.MonkeyPatch) -> Non
     result = asyncio.run(orchestrator.scan_diff(VENV_ONLY_DIFF, exclude=["*/.venv/*"]))
     assert result["status"] == "ok"
     assert result["findings"] == []
-    assert {Path(argv[0]).name for argv in calls} == {"semgrep", "bandit"}
+    assert {Path(argv[0]).name for argv in calls} == {"bandit"}
 
 
 def _spy_staging(monkeypatch: pytest.MonkeyPatch, seen: dict) -> None:
@@ -377,3 +377,48 @@ def test_stage_mirror_preserves_layout_and_remaps(tmp_path: Path) -> None:
     assert _remap_staged_path(str(target / "src" / "app.py"), staging, target) == str(
         target / "src" / "app.py"
     )
+
+
+def test_scan_diff_sast_uses_explicit_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list = []
+    install_capture_fake(monkeypatch, calls)
+    seen: dict = {}
+    real = orchestrator.materialize_diff_files
+
+    def _spy(diff: str, workdir: Path, exclude=None):  # type: ignore[no-untyped-def]
+        files = real(diff, workdir, exclude)
+        seen["files"] = [str(p) for p in files]
+        seen["workdir"] = str(workdir)
+        return files
+
+    monkeypatch.setattr(orchestrator, "materialize_diff_files", _spy)
+    result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
+    assert result["status"] == "ok"
+    assert seen["files"]
+    argv = _argv_for(calls, "semgrep")
+    assert argv[-len(seen["files"]) :] == seen["files"]
+    assert seen["workdir"] not in argv
+
+
+JS_INNERHTML_DIFF = """\
+diff --git a/app.js b/app.js
+index 1111111..2222222 100644
+--- a/app.js
++++ b/app.js
+@@ -0,0 +1 @@
++el.innerHTML = location.hash;
+"""
+
+
+def test_scan_diff_gitignored_tree_passes_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: tmp_path))
+    calls: list = []
+    install_capture_fake(monkeypatch, calls)
+    result = asyncio.run(orchestrator.scan_diff(JS_INNERHTML_DIFF))
+    assert result["status"] == "ok"
+    argv = _argv_for(calls, "semgrep")
+    assert argv[-1].endswith(".js")
+    assert any(str(tmp_path / ".bravoguard" / "tmp") in part for part in argv)
+    assert list((tmp_path / ".bravoguard" / "tmp").glob("bravoguard-diff-*")) == []

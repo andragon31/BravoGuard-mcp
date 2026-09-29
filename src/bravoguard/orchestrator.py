@@ -203,23 +203,37 @@ class ScannerTimeoutError(OrchestratorError):
         self.binary = binary
 
 
-def semgrep_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
+def semgrep_argv(
+    target: str | Path | list[str | Path] | tuple[str | Path, ...],
+    exclude: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
     """Primary SAST engine: semgrep with the portable rules/ config as JSON.
 
     ``exclude`` patterns become repeatable ``--exclude=PATTERN`` flags
     (``None`` adds no flags; callers pass normalized excludes explicitly).
+    ``target`` is one dir/file or an explicit file list (scan_diff passes
+    materialized files so gitignored trees are not skipped).
     """
     argv = [SEMGREP_ENGINE, "--config", str(RULES_DIR), "--json", "--quiet"]
     argv.extend(f"--exclude={pattern}" for pattern in dict.fromkeys(exclude or ()))
-    argv.append(target)
+    if isinstance(target, (list, tuple)):
+        argv.extend(str(item) for item in target)
+    else:
+        argv.append(str(target))
     return argv
 
 
-def opengrep_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
+def opengrep_argv(
+    target: str | Path | list[str | Path] | tuple[str | Path, ...],
+    exclude: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
     """Drop-in fallback: identical args run on the opengrep engine."""
     argv = [OPENGREP_FALLBACK, "--config", str(RULES_DIR), "--json", "--quiet"]
     argv.extend(f"--exclude={pattern}" for pattern in dict.fromkeys(exclude or ()))
-    argv.append(target)
+    if isinstance(target, (list, tuple)):
+        argv.extend(str(item) for item in target)
+    else:
+        argv.append(str(target))
     return argv
 
 
@@ -565,9 +579,13 @@ def materialize_diff_files(
 
 
 async def _scan_sast(
-    target: str, timeout: float, exclude: tuple[str, ...] = ()
+    target: str | Path | list[str | Path] | tuple[str | Path, ...],
+    timeout: float,
+    exclude: tuple[str, ...] = (),
 ) -> tuple[str, Any]:
     """Run semgrep, falling back to opengrep with identical args."""
+    if isinstance(target, (list, tuple)) and not target:
+        return SEMGREP_ENGINE, {"results": []}
     try:
         payload = await run_scanner_json(
             semgrep_argv(target, exclude), input_data=None, timeout=timeout
@@ -1009,15 +1027,17 @@ async def scan_diff(
     budget = timeout if timeout and timeout > 0 else DIFF_TIMEOUT_SECONDS
     workdir = Path(tempfile.mkdtemp(prefix="bravoguard-diff-", dir=str(materialize_base())))
     try:
-        materialize_diff_files(diff, workdir, excludes)
+        files = materialize_diff_files(diff, workdir, excludes)
         filtered = _filter_diff(diff, excludes)
         secrets_job = (
             _run_betterleaks_stdin(filtered.encode("utf-8"), budget)
             if filtered.strip()
             else _empty_secrets_result()
         )
+        # Semgrep skips gitignored dirs (.bravoguard/tmp); explicit files bypass the skip.
+        # Bandit ignores gitignore so it keeps the workdir; repo scans keep dir targets.
         jobs = [
-            ("sast", _scan_sast(str(workdir), budget, excludes)),
+            ("sast", _scan_sast(files, budget, excludes)),
             ("bandit", _run_bandit(str(workdir), budget, excludes)),
             ("betterleaks", secrets_job),
         ]
