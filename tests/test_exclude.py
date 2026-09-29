@@ -10,9 +10,11 @@ from bravoguard import orchestrator
 from bravoguard.cache import FindingCache
 from bravoguard.orchestrator import (
     _dir_fingerprint,
+    _enumerate_sast_files,
     _filter_diff,
     _is_excluded,
     _remap_staged_path,
+    _scan_sast_repo_files,
     _stage_filtered_tree,
     materialize_diff_files,
 )
@@ -327,7 +329,11 @@ def test_scan_repo_default_excludes_skip_venv(
     assert result["status"] == "ok"
     semgrep_argv = _argv_for(calls, "semgrep")
     assert "--exclude=.venv/" in semgrep_argv
-    assert semgrep_argv[-1] == str(tmp_path)
+    # S1: SAST receives explicit files, never the raw dir (semgrep-core must
+    # not enumerate hostile trees). Assertion intentionally changed from
+    # `semgrep_argv[-1] == str(tmp_path)`.
+    assert str(tmp_path / "src" / "app.py") in semgrep_argv
+    assert str(tmp_path) not in semgrep_argv
     bandit_argv = _argv_for(calls, "bandit")
     assert "*/.venv/*" in bandit_argv[bandit_argv.index("-x") + 1].split(",")
     secrets_argv = _argv_for(calls, "betterleaks")
@@ -348,6 +354,8 @@ def test_scan_repo_explicit_venv_pattern_end_to_end(
     result = asyncio.run(orchestrator.scan_repo(str(tmp_path), exclude=["*/.venv/*"]))
     assert result["status"] == "ok"
     assert "--exclude=*/.venv/*" in _argv_for(calls, "semgrep")
+    # S1: explicit files replace the raw dir target (see above).
+    assert str(tmp_path / "src" / "app.py") in _argv_for(calls, "semgrep")
     assert seen["staged"] == ["src/app.py"]
 
 
@@ -422,3 +430,177 @@ def test_scan_diff_gitignored_tree_passes_files(
     assert argv[-1].endswith(".js")
     assert any(str(tmp_path / ".bravoguard" / "tmp") in part for part in argv)
     assert list((tmp_path / ".bravoguard" / "tmp").glob("bravoguard-diff-*")) == []
+
+
+# S1 scan_repo SAST file-list lane: explicit pre-filtered files, chunked.
+
+
+def test_enumerate_sast_files_extensions_excludes_and_nonregular(tmp_path: Path) -> None:
+    for name in ("good.py", "types.pyi", "app.js", "app.jsx", "app.ts", "app.tsx", "app.mjs",
+                 "app.cjs", "UPPER.PY"):
+        _write(tmp_path / name, "x = 1\n")
+    _write(tmp_path / "notes.txt", "x = 1\n")
+    _write(tmp_path / "clip.mp4", "fake-bytes")
+    _write(tmp_path / ".venv" / "evil.py", "assert True\n")
+    _write(tmp_path / ".git" / "hooks" / "hook.py", "x = 1\n")
+    _write(tmp_path / "skipme.py", "x = 1\n")
+    (tmp_path / "fakedir.py").mkdir()  # .py-suffixed dir is not a regular file
+    link = tmp_path / "link.py"
+    try:
+        link.symlink_to(tmp_path / "good.py")
+        symlink_ok = True
+    except OSError:
+        symlink_ok = False  # Windows without developer mode: skip symlink assertion
+    found = {p.name for p in _enumerate_sast_files(tmp_path, (".venv/", "skipme.py"))}
+    assert {"good.py", "types.pyi", "app.js", "app.jsx", "app.ts",
+            "app.tsx", "app.mjs", "app.cjs", "UPPER.PY"} <= found
+    assert "notes.txt" not in found
+    assert "clip.mp4" not in found
+    assert "evil.py" not in found
+    assert "hook.py" not in found
+    assert "skipme.py" not in found
+    assert "fakedir.py" not in found
+    if symlink_ok:
+        assert "link.py" not in found
+
+
+def test_enumerate_sast_files_single_file_target(tmp_path: Path) -> None:
+    target = tmp_path / "only.py"
+    _write(target, "x = 1\n")
+    assert _enumerate_sast_files(target, ()) == [target]
+    other = tmp_path / "notes.txt"
+    _write(other, "x = 1\n")
+    assert _enumerate_sast_files(other, ()) == []
+    assert _enumerate_sast_files(target, ("only.py",)) == []
+
+
+def test_sast_repo_files_chunks_at_hundred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for i in range(101):
+        _write(tmp_path / f"mod_{i:03d}.py", "x = 1\n")
+    calls: list = []
+    install_capture_fake(monkeypatch, calls)
+    engine, payload = asyncio.run(
+        _scan_sast_repo_files(tmp_path, 60, ("*.wav",))
+    )
+    assert engine == "semgrep"
+    assert payload == {"results": []}
+    semgrep_calls = [argv for argv in calls if Path(argv[0]).name == "semgrep"]
+    assert len(semgrep_calls) == 2
+    assert len(semgrep_calls[0]) - 6 == 100  # 5 fixed argv + 1 --exclude flag
+    assert len(semgrep_calls[1]) - 6 == 1
+    for argv in semgrep_calls:
+        assert "--exclude=*.wav" in argv
+        assert all(part.endswith(".py") for part in argv[-100:] if part.startswith(str(tmp_path)))
+
+
+def test_sast_repo_files_empty_without_spawning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / "notes.txt", "x = 1\n")
+    calls: list = []
+    install_capture_fake(monkeypatch, calls)
+    assert asyncio.run(_scan_sast_repo_files(tmp_path, 60, ())) == (
+        "semgrep",
+        {"results": []},
+    )
+    assert calls == []
+
+
+def test_sast_repo_files_timeout_keeps_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(orchestrator, "SAST_FILES_PER_SCAN", 1)
+    _write(tmp_path / "a.py", "x = 1\n")
+    _write(tmp_path / "b.py", "y = 2\n")
+    hit = json.dumps(
+        {
+            "results": [
+                {
+                    "check_id": "bravoguard-python-eval-exec",
+                    "path": "a.py",
+                    "start": {"line": 1, "col": 1},
+                    "end": {"line": 1, "col": 5},
+                    "extra": {
+                        "message": "Avoid eval.",
+                        "severity": "ERROR",
+                        "metadata": {"cwe": "CWE-95"},
+                    },
+                }
+            ],
+            "errors": [],
+        }
+    ).encode()
+    seen: list = []
+
+    class HangingProcess(FakeProcess):
+        async def communicate(self, input_data=None):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(30)  # hangs inside communicate -> per-chunk wait_for fires
+            return (b"", b"")
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        name = Path(str(argv[0])).name
+        if name == "semgrep":
+            seen.append(list(argv))
+            if len(seen) == 1:
+                return FakeProcess(hit, 1)
+            return HangingProcess(b"", 0)
+        if name in ("bandit", "betterleaks", "gitleaks", "opengrep"):
+            table = {
+                "bandit": b'{"results": []}',
+                "betterleaks": b"[]",
+                "gitleaks": b"[]",
+                "opengrep": b'{"results": []}',
+            }
+            return FakeProcess(table[name], 0)
+        raise FileNotFoundError(name)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    result = asyncio.run(orchestrator.scan_repo(str(tmp_path), timeout=0.6))
+    assert result["status"] == "ok"
+    assert result["errors"]["sast"] == "timeout"
+    assert any(f["rule_id"] == "bravoguard-python-eval-exec" for f in result["findings"])
+
+
+def test_scan_repo_sast_receives_files_not_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / "app.py", "x = 1\n")
+    _write(tmp_path / "notes.txt", "x = 1\n")
+    _write(tmp_path / "img.png", "fake-bytes")
+    calls: list = []
+    install_capture_fake(monkeypatch, calls)
+    result = asyncio.run(orchestrator.scan_repo(str(tmp_path)))
+    assert result["status"] == "ok"
+    argv = _argv_for(calls, "semgrep")
+    assert str(tmp_path / "app.py") in argv
+    assert str(tmp_path) not in argv
+    assert not any(part.endswith(("notes.txt", "img.png")) for part in argv)
+    assert "--exclude=.venv/" in argv  # defense in depth: flags stay on file-list argv
+
+
+def test_scan_repo_sast_fallback_receives_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path / "app.py", "x = 1\n")
+    calls: list = []
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        calls.append(list(argv))
+        name = Path(str(argv[0])).name
+        if name == "semgrep":
+            raise FileNotFoundError(name)
+        if name == "opengrep":
+            return FakeProcess(json.dumps({"results": []}).encode(), 0)
+        if name == "bandit":
+            return FakeProcess(b'{"results": []}', 0)
+        if name == "betterleaks":
+            return FakeProcess(b"[]", 0)
+        raise FileNotFoundError(name)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    result = asyncio.run(orchestrator.scan_repo(str(tmp_path)))
+    assert result["status"] == "ok"
+    argv = _argv_for(calls, "opengrep")
+    assert str(tmp_path / "app.py") in argv
+    assert str(tmp_path) not in argv
+    assert "--exclude=.venv/" in argv

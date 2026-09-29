@@ -38,7 +38,11 @@ Exclude enforcement (``exclude`` param, default :data:`DEFAULT_EXCLUDES`):
 - SAST (semgrep/opengrep): native repeatable ``--exclude=PATTERN`` flags
   (verified against semgrep 1.178 ``scan --help``; opengrep keeps identical
   args). Patterns pass through raw; engine-side glob dialect is gitignore
-  style, so exotic shapes are best-effort there.
+  style, so exotic shapes are best-effort there. ``scan_repo`` additionally
+  passes explicit pre-filtered file lists (``SAST_FILE_EXTENSIONS``,
+  ``_is_excluded``-filtered, chunked at ``SAST_FILES_PER_SCAN`` sharing the
+  lane budget) so semgrep-core never enumerates hostile trees; ``scan_diff``
+  already passes explicit materialized files.
 - Bandit: native ``-x`` comma list (verified in bandit 1.9.4 ``--help``:
   ``-x EXCLUDED_PATHS``, glob patterns supported). Bandit matches against
   absolute paths and ignores trailing-slash dir prefixes, so patterns are
@@ -128,6 +132,15 @@ CHECKOV_ENGINE = "checkov"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
 
+# SAST candidate extensions (scan_repo file-list lane): rules/python targets
+# python (.py/.pyi), rules/frontend targets javascript+typescript
+# (.js/.jsx/.ts/.tsx/.mjs/.cjs). Semgrep detects language from the suffix,
+# so only these suffixes are enumerated.
+SAST_FILE_EXTENSIONS: tuple[str, ...] = (".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+# Windows command-line limits bound explicit file-list argv; chunks share the
+# SAST lane budget evenly (per-chunk = budget / chunk count).
+SAST_FILES_PER_SCAN = 100
+
 # Default scan exclusions: media/binary dirs and extensions skipped by the
 # fingerprint and the diff materializer (real-project scans exclude them so
 # media churn never invalidates the cache). `.git` is always excluded.
@@ -201,6 +214,21 @@ class ScannerTimeoutError(OrchestratorError):
     def __init__(self, binary: str) -> None:
         super().__init__(f"scanner timed out: {binary}")
         self.binary = binary
+
+
+class _SastPartialTimeout(ScannerTimeoutError):
+    """Chunk timeout carrying findings-so-far (scan_repo SAST file-list lane).
+
+    A chunk timeout aborts the remaining chunks; the merged payload collected
+    before the timeout rides along so ``_collect`` keeps those findings while
+    still recording an honest ``timeout`` error (friendlier than dropping
+    completed-chunk findings).
+    """
+
+    def __init__(self, binary: str, payload: Any, engine: str) -> None:
+        super().__init__(binary)
+        self.partial_payload = payload
+        self.engine = engine
 
 
 def semgrep_argv(
@@ -598,6 +626,93 @@ async def _scan_sast(
         return OPENGREP_FALLBACK, payload
 
 
+def _enumerate_sast_files(target: Path, excludes: tuple[str, ...]) -> list[Path]:
+    """List SAST candidate files under ``target`` (scan_repo lane only).
+
+    Only :data:`SAST_FILE_EXTENSIONS` suffixes are collected; :func:`_is_excluded`
+    stays the single matcher (its rel-posix + basename forms cover both). Entries
+    failing ``is_file() and not is_symlink()`` are skipped — that drops sockets,
+    fifos, and symlinks (never followed, so symlink loops cannot hang
+    enumeration; no symlinks proven in the hostile trees, and the check is one
+    cheap stat). ``.git`` is never descended. A single-file ``target`` with a
+    matching suffix is accepted as-is (already resolved by ``resolve_scan_path``).
+    """
+    if target.is_file():
+        if target.suffix.lower() in SAST_FILE_EXTENSIONS and not _is_excluded(
+            target.name, excludes
+        ):
+            return [target]
+        return []
+    try:
+        entries = sorted(p for p in target.rglob("*") if ".git" not in p.parts)
+    except OSError:
+        return []
+    candidates = []
+    for path in entries:
+        if not path.is_file() or path.is_symlink():
+            continue
+        if path.suffix.lower() not in SAST_FILE_EXTENSIONS:
+            continue
+        try:
+            rel = path.relative_to(target).as_posix()
+        except (OSError, ValueError):
+            continue
+        if _is_excluded(rel, excludes):
+            continue
+        candidates.append(path)
+    return candidates
+
+
+def _merge_sast_payloads(payloads: list[Any]) -> dict[str, Any]:
+    """Concatenate chunk ``results``/``errors`` into one semgrep-shaped payload."""
+    results: list[Any] = []
+    errors: list[Any] = []
+    for payload in payloads:
+        if isinstance(payload, dict):
+            items = payload.get("results", [])
+            if isinstance(items, list):
+                results.extend(items)
+            errs = payload.get("errors", [])
+            if isinstance(errs, list):
+                errors.extend(errs)
+        elif isinstance(payload, list):
+            results.extend(payload)
+    merged: dict[str, Any] = {"results": results}
+    if errors:
+        merged["errors"] = errors
+    return merged
+
+
+async def _scan_sast_repo_files(
+    target: Path, timeout: float, exclude: tuple[str, ...] = ()
+) -> tuple[str, Any]:
+    """scan_repo SAST lane over explicit pre-filtered file lists, chunked.
+
+    semgrep-core fails enumerating hostile trees (exit -1 "Failed to obtain
+    target files"); explicit files bypass enumeration, same class as the L3
+    scan_diff fix. ``--exclude`` flags stay on every argv (defense in depth)
+    and the opengrep fallback is per-chunk identical. Empty candidate list
+    returns ok/empty without spawning. Cache keys are unchanged: the key
+    already digests target content (relpath+size+mtime) plus normalized
+    excludes, and the candidate SET is a pure function of those two, so file
+    lists and chunking need no key change.
+    """
+    files = _enumerate_sast_files(target, exclude)
+    if not files:
+        return SEMGREP_ENGINE, {"results": []}
+    chunks = [files[i : i + SAST_FILES_PER_SCAN] for i in range(0, len(files), SAST_FILES_PER_SCAN)]
+    per_chunk = timeout / len(chunks)
+    payloads: list[Any] = []
+    engine = SEMGREP_ENGINE
+    for chunk in chunks:
+        try:
+            engine, payload = await _scan_sast(chunk, per_chunk, exclude)
+        except ScannerTimeoutError as exc:
+            raise _SastPartialTimeout(exc.binary, _merge_sast_payloads(payloads), engine) from None
+        payloads.append(payload)
+    return engine, _merge_sast_payloads(payloads)
+
+
 async def _run_bandit(
     target: str, timeout: float, exclude: tuple[str, ...] = ()
 ) -> tuple[str, Any]:
@@ -979,6 +1094,8 @@ async def _collect(jobs: list[tuple[str, Any]]) -> dict[str, Any]:
     errors: dict[str, str] = {}
     for label, result in zip(labels, results):
         if isinstance(result, BaseException):
+            if isinstance(result, _SastPartialTimeout):
+                findings.extend(_NORMALIZERS[label](result.partial_payload))
             errors[label] = _error_reason(result)
             continue
         _, payload = result
@@ -1103,7 +1220,7 @@ async def scan_repo(
             else _empty_secrets_result()
         )
         jobs = [
-            ("sast", _scan_sast(str(target), budget, excludes)),
+            ("sast", _scan_sast_repo_files(target, budget, excludes)),
             ("bandit", _run_bandit(str(target), budget, excludes)),
             ("betterleaks", secrets_job),
             ("oxlint", _run_oxlint(str(target), budget, excludes)),
