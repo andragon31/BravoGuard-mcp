@@ -95,6 +95,16 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   see `docs/DOCKER_PROOF.md`.
 
 ### Fixed
+- C1 own-code cache invalidation (`feature/bravoguard-cache-version`,
+  `src/bravoguard/cache.py` + `tests/test_cache.py`): `scanner_fingerprint()`
+  now appends a `code:<hex12>` segment — sha256 over the bytes of a fixed
+  core-module set (`orchestrator.py`, `normalizer.py`, `server.py`,
+  `cache.py`, `osv.py`, `suggest.py`), resolved against the package
+  `__file__` (never cwd, no git dependency; missing/unreadable files feed a
+  fixed sentinel, never a crash), computed once per process (`lru_cache`).
+  `scan_diff`/`scan_repo` (via `make_scan_key`) and `osv_lookup` (via
+  `make_osv_key`) all flow through it, so any own-code change busts the
+  cache while content/scanner/DB invalidation behaves as before.
 - L1 diff-materializer base (`feature/bravoguard-local-materialize`,
   `src/bravoguard/orchestrator.py` + `tests/test_orchestrator.py` +
   `.gitignore`): `scan_diff` materializes under the new `materialize_base()`

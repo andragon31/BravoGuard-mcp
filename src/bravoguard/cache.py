@@ -7,8 +7,9 @@ store via :func:`make_osv_key` (real scanner wiring lands in T4).
 
 Key formula: ``sha256(content-hash + scanner versions + DB UpdatedAt/Built
 + image digest + rule versions)``. Scanner versions come from
-``tools-manifest.json`` plus orchestrator engine constants; DB dates default
-to empty so the schema stays forward-compatible.
+``tools-manifest.json`` plus orchestrator engine constants plus a ``code:``
+source hash of our own core modules (any own-code change busts the cache).
+DB dates default to empty so the schema stays forward-compatible.
 
 Storage: one SQLite table, default path ``.bravoguard/cache.db`` (cwd),
 override with ``BRAVO_CACHE_PATH`` (``:memory:`` for tests). TTL is optional
@@ -25,6 +26,7 @@ import os
 import sqlite3
 import tempfile
 import time
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Self
 
@@ -44,6 +46,7 @@ __all__ = [
     "DEFAULT_CACHE_FILENAME",
     "IN_MEMORY_PATH",
     "FindingCache",
+    "code_fingerprint",
     "content_hash",
     "get",
     "get_default_cache",
@@ -76,14 +79,54 @@ def _manifest_versions(manifest_path: Path | None = None) -> str:
 
 
 def scanner_fingerprint(manifest_path: Path | None = None) -> str:
-    """Scanner version string: orchestrator engines + manifest pins."""
+    """Scanner version string: orchestrator engines + manifest pins + own code.
+
+    Format: ``"<engines>|<manifest>|code:<hex12>"`` where ``code:`` is
+    :func:`code_fingerprint`. Appending the code segment keeps every caller
+    (``scan_diff`` / ``scan_repo`` via :func:`make_scan_key`, ``osv_lookup``
+    via :func:`make_osv_key``) on the same invalidation without per-path
+    edits; content hash, scanner versions, and DB fields behave as before.
+    """
     try:
         from bravoguard import orchestrator as _orch
 
         engines = f"{_orch.SEMGREP_ENGINE}+{_orch.OPENGREP_FALLBACK}"
     except (ImportError, AttributeError):
         engines = "semgrep+opengrep"
-    return f"{engines}|{_manifest_versions(manifest_path)}"
+    return f"{engines}|{_manifest_versions(manifest_path)}|{code_fingerprint()}"
+
+
+_CODE_MODULES: tuple[str, ...] = (
+    "orchestrator.py",
+    "normalizer.py",
+    "server.py",
+    "cache.py",
+    "osv.py",
+    "suggest.py",
+)
+
+_MISSING_SOURCE_SENTINEL = b"\x00bravoguard-missing-source\x00"
+
+
+@lru_cache(maxsize=1)
+def code_fingerprint() -> str:
+    """Own-code version signal: ``code:<sha256-of-sources hex12>``.
+
+    Hashes the bytes of a fixed core-module set, resolved against the
+    package ``__file__`` (never cwd, so installed copies and Docker layers
+    work; no git dependency). A missing/unreadable file contributes a fixed
+    sentinel instead of crashing. Computed once per process via ``lru_cache``
+    so repeat scans pay no file IO.
+    """
+    base = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in _CODE_MODULES:
+        try:
+            digest.update((base / name).read_bytes())
+        except OSError:
+            digest.update(_MISSING_SOURCE_SENTINEL)
+        digest.update(b"\x00")
+    return f"code:{digest.hexdigest()[:12]}"
 
 
 def rules_fingerprint(rules_dir: Path | None = None) -> str:

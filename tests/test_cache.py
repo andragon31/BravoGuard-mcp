@@ -10,6 +10,7 @@ import pytest
 from bravoguard import orchestrator
 from bravoguard.cache import (
     FindingCache,
+    code_fingerprint,
     content_hash,
     make_key,
     make_osv_key,
@@ -312,3 +313,119 @@ def test_cache_hit_preserves_errors(monkeypatch: pytest.MonkeyPatch) -> None:
         assert second["findings"] == first["findings"]
     finally:
         cache.close()
+
+
+# --- C1: own-code version signal in the cache fingerprint ---
+
+EXPECTED_CODE_MODULES = {
+    "orchestrator.py",
+    "normalizer.py",
+    "server.py",
+    "cache.py",
+    "osv.py",
+    "suggest.py",
+}
+
+
+@pytest.fixture
+def fresh_code_fingerprint():
+    code_fingerprint.cache_clear()
+    try:
+        yield code_fingerprint
+    finally:
+        code_fingerprint.cache_clear()
+
+
+def _patch_source_bytes(
+    monkeypatch: pytest.MonkeyPatch, name: str, data: bytes | None = None
+) -> None:
+    """Simulate a source change (or missing file) without touching the tree."""
+    real_read_bytes = Path.read_bytes
+
+    def fake_read_bytes(self: Path, *args: object, **kwargs: object) -> bytes:
+        if self.name == name and self.parent.name == "bravoguard":
+            if data is None:
+                raise FileNotFoundError(str(self))
+            return data
+        return real_read_bytes(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_bytes", fake_read_bytes)
+
+
+def test_code_segment_embeds_in_fingerprint(fresh_code_fingerprint) -> None:
+    fingerprint = scanner_fingerprint()
+    assert "code:" in fingerprint
+    segment = fingerprint.rsplit("code:", 1)[1]
+    assert len(segment) == 12
+    int(segment, 16)
+
+
+def test_key_changes_when_source_changes(
+    monkeypatch: pytest.MonkeyPatch, fresh_code_fingerprint
+) -> None:
+    baseline = make_scan_key(SEED_DIFF)
+    _patch_source_bytes(monkeypatch, "orchestrator.py", b"tampered-source")
+    fresh_code_fingerprint.cache_clear()
+    assert make_scan_key(SEED_DIFF) != baseline
+
+
+def test_key_stable_on_identical_tree(fresh_code_fingerprint) -> None:
+    first = make_scan_key(SEED_DIFF)
+    fresh_code_fingerprint.cache_clear()
+    assert make_scan_key(SEED_DIFF) == first
+    fresh_code_fingerprint.cache_clear()
+    assert make_osv_key("django", "4.2") == make_osv_key("django", "4.2")
+
+
+def test_missing_source_file_never_crashes(
+    monkeypatch: pytest.MonkeyPatch, fresh_code_fingerprint
+) -> None:
+    baseline = make_scan_key(SEED_DIFF)
+    _patch_source_bytes(monkeypatch, "suggest.py")
+    fresh_code_fingerprint.cache_clear()
+    segment = fresh_code_fingerprint()
+    assert segment.startswith("code:")
+    int(segment.removeprefix("code:"), 16)
+    assert make_scan_key(SEED_DIFF) != baseline
+
+
+def test_code_segment_shared_by_diff_repo_osv_keys(
+    monkeypatch: pytest.MonkeyPatch, fresh_code_fingerprint
+) -> None:
+    from bravoguard import cache as cache_module
+
+    monkeypatch.setattr(cache_module, "code_fingerprint", lambda: "code:aaaaaaaaaaaa")
+    scanner_a = scanner_fingerprint()
+    scan_a = make_scan_key(SEED_DIFF)
+    osv_a = make_osv_key("django", "4.2")
+    monkeypatch.setattr(cache_module, "code_fingerprint", lambda: "code:bbbbbbbbbbbb")
+    assert "code:bbbbbbbbbbbb" in scanner_fingerprint()
+    assert make_scan_key(SEED_DIFF) != scan_a
+    assert make_osv_key("django", "4.2") != osv_a
+    assert "code:aaaaaaaaaaaa" in scanner_a
+
+
+def test_code_fingerprint_read_once(
+    monkeypatch: pytest.MonkeyPatch, fresh_code_fingerprint
+) -> None:
+    real_read_bytes = Path.read_bytes
+    seen: list[str] = []
+
+    def counting_read_bytes(self: Path, *args: object, **kwargs: object) -> bytes:
+        if self.parent.name == "bravoguard" and self.suffix == ".py":
+            seen.append(self.name)
+        return real_read_bytes(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+    first = fresh_code_fingerprint()
+    assert sorted(seen) == sorted(EXPECTED_CODE_MODULES)
+    assert fresh_code_fingerprint() == first
+    assert sorted(seen) == sorted(EXPECTED_CODE_MODULES)
+
+
+def test_code_fingerprint_amortized_fast(fresh_code_fingerprint) -> None:
+    fresh_code_fingerprint()
+    start = time.perf_counter()
+    for _ in range(50):
+        fresh_code_fingerprint()
+    assert (time.perf_counter() - start) / 50 * 1000 < 2
