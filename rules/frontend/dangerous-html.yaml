@@ -2,12 +2,15 @@ rules:
   - id: bravoguard-frontend-dangerous-html
     languages: [javascript, typescript]
     severity: WARNING
-    message: Avoid dangerouslySetInnerHTML with untrusted data (CWE-79). Prefer textContent or a sanitizer.
+    message: Avoid dangerouslySetInnerHTML/innerHTML with untrusted data (CWE-79). Prefer textContent or a sanitizer.
     metadata:
       cwe: "CWE-79"
       owasp_2025: A05
       fix_hint: "Use textContent or DOMPurify.sanitize before dangerouslySetInnerHTML."
-    pattern: dangerouslySetInnerHTML={{ __html: $HTML }}
+    patterns:
+      - pattern-either:
+          - pattern: '<$TAG dangerouslySetInnerHTML={{ __html: $HTML }} />'
+          - pattern: $EL.innerHTML = $HTML
   - id: bravoguard-frontend-bypass-security-trust
     languages: [javascript, typescript]
     severity: WARNING

@@ -16,6 +16,7 @@ import json
 import platform
 import shutil
 import sqlite3
+import sys
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -126,6 +127,9 @@ def cmd_tools() -> int:
         print(f"{name:<14} {pinned:<12} {extra}")
     for t in PYTHON_TOOLS:
         ok = shutil.which(t) is not None
+        if not ok and t == "guarddog" and sys.platform == "win32":
+            print(f"{t:<14} {'isolated':<12} SKIPPED (nono-py fails to build on Windows; Linux path unaffected)")
+            continue
         print(f"{t:<14} {'isolated':<12} {_tool_version(t) if ok else 'MISSING (pipx/uv-tool)'}")
     return 0
 
@@ -192,6 +196,10 @@ def cmd_doctor(strict: bool = False) -> int:
     missing = [t for t in PYTHON_TOOLS + CORE_BINARIES if _probe_binary(t) is None]
     if strict:
         missing += [t for t in OPTIONAL_BINARIES if shutil.which(t) is None]
+    if sys.platform == "win32" and "guarddog" in missing:
+        # Installer-known skip: nono-py fails to build on Windows; Linux path unaffected.
+        missing.remove("guarddog")
+        print("[WARN] guarddog missing (nono-py fails to build on Windows; Linux path unaffected)")
     if missing:
         failures.append(f"missing tools: {missing}")
         print(f"[fail] missing tools: {missing}")

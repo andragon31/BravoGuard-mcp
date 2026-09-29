@@ -32,7 +32,17 @@ def check_python_tools() -> list[str]:
 
 
 def check_binaries(names: list[str]) -> list[str]:
-    return [f"bin:{n} (see tools-manifest.json)" for n in names if shutil.which(n) is None]
+    missing: list[str] = []
+    for n in names:
+        if n == "betterleaks":
+            # Secrets edge: gitleaks v8 fallback satisfies betterleaks
+            # (mirrors orchestrator.resolve_secrets_binary).
+            if shutil.which("betterleaks") is not None or shutil.which("gitleaks") is not None:
+                continue
+            missing.append("bin:betterleaks (see tools-manifest.json; gitleaks v8 fallback accepted)")
+        elif shutil.which(n) is None:
+            missing.append(f"bin:{n} (see tools-manifest.json)")
+    return missing
 
 
 def main() -> int:

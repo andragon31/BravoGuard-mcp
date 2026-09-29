@@ -1,5 +1,8 @@
 """CLI smoke: version/doctor/tools run without scanners installed."""
 
+import shutil
+import sys
+
 EXPECTED = {"scan_diff", "scan_repo", "osv_lookup", "owasp_explain", "suggest_fix"}
 
 
@@ -21,6 +24,37 @@ def test_cli_doctor_core_shape() -> None:
     from bravoguard.cli import cmd_doctor
 
     assert cmd_doctor(strict=False) in (0, 1)
+
+
+def test_doctor_guarddog_warns_not_fails_on_windows(monkeypatch, capsys) -> None:
+    from bravoguard import cli
+
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "guarddog" else f"/fake/{name}")
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert cli.cmd_doctor(strict=False) == 0
+    out = capsys.readouterr().out
+    assert "WARN" in out and "guarddog" in out and "nono-py" in out
+    assert "doctor: PASS" in out
+
+
+def test_doctor_guarddog_still_fails_on_linux(monkeypatch, capsys) -> None:
+    from bravoguard import cli
+
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "guarddog" else f"/fake/{name}")
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert cli.cmd_doctor(strict=False) == 1
+    out = capsys.readouterr().out
+    assert "guarddog" in out and "doctor: FAIL" in out
+
+
+def test_tools_marks_guarddog_skipped_on_windows(monkeypatch, capsys) -> None:
+    from bravoguard import cli
+
+    monkeypatch.setattr(shutil, "which", lambda name: None if name == "guarddog" else f"/fake/{name}")
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert cli.cmd_tools() == 0
+    out = capsys.readouterr().out
+    assert "SKIPPED" in out and "guarddog" in out
 
 
 def test_release_url_rejects_non_http_schemes() -> None:

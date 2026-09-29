@@ -5,7 +5,9 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
 - SAST: ``semgrep --config rules/ --json`` with ``opengrep`` fallback (same args).
 - Python: ``bandit -f json`` over the scan target.
 - Secrets: ``betterleaks detect`` (diff via stdin, repo via path) with a
-  ``gitleaks`` v8 fallback (same flags) when betterleaks is missing.
+  ``gitleaks`` v8 fallback when betterleaks is missing. The fallback adds
+  ``--report-path`` capture (this gitleaks build prints only logs to
+  stdout); the tmpfile is read once, deleted, and never logged.
 - Frontend: ``oxlint <target> --format json`` (M1).
 - Container/IaC: ``trivy fs --format json --scanners vuln,misconfig``
   (M1; the ``secret`` scanner is excluded on purpose — betterleaks owns
@@ -621,6 +623,56 @@ async def _run_checkov(
     return "checkov", payload
 
 
+def _ignore_scanner_stdout(_text: str) -> dict[str, Any]:
+    """Tolerant stdout parse for the gitleaks fallback: stdout carries log
+    lines (never findings), so it is discarded — the report file wins."""
+    return {}
+
+
+def _read_secrets_report(report: str, binary: str) -> Any:
+    """Read one gitleaks ``--report-path`` file (contents never logged).
+
+    A missing file means the engine ran but produced nothing; unparsable
+    JSON mirrors :func:`run_scanner_json` — both stay ``failed``.
+    """
+    try:
+        text = Path(report).read_text(encoding="utf-8")
+    except OSError:
+        raise OrchestratorError(f"scanner failed: {binary}") from None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        raise OrchestratorError(f"scanner returned invalid JSON: {binary}") from None
+
+
+async def _run_gitleaks_with_report(
+    argv: list[str], *, input_data: bytes | None, timeout: float
+) -> Any:
+    """Gitleaks fallback leg with ``--report-path`` tmpfile capture.
+
+    The tmpfile is read once then deleted; its contents never reach logs
+    or errors (Secret/Match redaction in the normalizer is unchanged).
+    """
+    binary = argv[0] if argv else GITLEAKS_FALLBACK
+    with tempfile.NamedTemporaryFile(
+        prefix="bravoguard-secrets-", suffix=".json", delete=False
+    ) as tmp:
+        report = tmp.name
+    with contextlib.suppress(OSError):
+        Path(report).unlink()
+    try:
+        await run_scanner_json(
+            [*argv, "--report-path", report],
+            input_data=input_data,
+            timeout=timeout,
+            parse=_ignore_scanner_stdout,
+        )
+        return _read_secrets_report(report, binary)
+    finally:
+        with contextlib.suppress(OSError):
+            Path(report).unlink()
+
+
 async def _run_secrets_with_fallback(
     primary: list[str], fallback: list[str], *, input_data: bytes | None, timeout: float
 ) -> tuple[str, Any]:
@@ -628,7 +680,8 @@ async def _run_secrets_with_fallback(
 
     Same try-next-candidate shape as semgrep/opengrep. The ``betterleaks``
     result label is kept so normalization is unchanged; a combined missing
-    error surfaces only when neither binary runs.
+    error surfaces only when neither binary runs. The gitleaks leg reads
+    findings from a ``--report-path`` tmpfile (stdout is logs only).
     """
     try:
         payload = await run_scanner_json(primary, input_data=input_data, timeout=timeout)
@@ -637,7 +690,7 @@ async def _run_secrets_with_fallback(
         if resolve_secrets_binary() != GITLEAKS_FALLBACK:
             raise ScannerMissingError(f"{BETTERLEAKS_ENGINE}/{GITLEAKS_FALLBACK}") from None
     try:
-        payload = await run_scanner_json(fallback, input_data=input_data, timeout=timeout)
+        payload = await _run_gitleaks_with_report(fallback, input_data=input_data, timeout=timeout)
     except ScannerMissingError:
         raise ScannerMissingError(f"{BETTERLEAKS_ENGINE}/{GITLEAKS_FALLBACK}") from None
     return "betterleaks", payload

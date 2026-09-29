@@ -3,7 +3,9 @@
 import asyncio
 import json
 import shutil
+import tempfile
 from pathlib import Path
+from typing import Self
 
 import pytest
 
@@ -311,14 +313,104 @@ def test_secrets_falls_back_to_gitleaks_when_betterleaks_absent(
             }
         ]
     ).encode()
-    responses = quiet_responses(gitleaks=(leaks, 0))
-    del responses["betterleaks"]
-    install_fake(monkeypatch, responses, calls)
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        calls.append((list(argv), dict(kwargs)))
+        assert "shell" not in kwargs, "scanners must never run with shell=True"
+        name = Path(str(argv[0])).name
+        if name == "betterleaks":
+            raise FileNotFoundError(name)
+        if name == "gitleaks":
+            # This gitleaks build prints only logs to stdout: findings arrive
+            # via the --report-path tmpfile, which the fake writes here.
+            arglist = list(argv)
+            assert "--report-path" in arglist
+            report = arglist[arglist.index("--report-path") + 1]
+            Path(report).write_bytes(leaks)
+            return FakeProcess(b"INF scanned (stdout carries logs only)", 1)
+        if name in ("semgrep", "bandit"):
+            return FakeProcess(b'{"results": []}', 0)
+        raise FileNotFoundError(name)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
     result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
     assert "sk-live-abcdef123456" not in json.dumps(result)
     assert any(f["rule_id"] == "generic-api-key" for f in result["findings"])
+    gitleaks_argv = next(argv for argv, _ in calls if Path(argv[0]).name == "gitleaks")
+    assert "--report-path" in gitleaks_argv
     binaries = {Path(argv[0]).name for argv, _ in calls}
     assert {"betterleaks", "gitleaks"} <= binaries
+
+
+def test_gitleaks_report_tmpfile_deleted_after_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/local/bin/gitleaks" if name == "gitleaks" else None
+    )
+    report = tmp_path / "gitleaks-report.json"
+
+    class _Tmp:
+        name = str(report)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", lambda **kwargs: _Tmp())
+    leaks = json.dumps(
+        [
+            {
+                "Description": "Generic API Key",
+                "RuleID": "generic-api-key",
+                "File": "app.py",
+                "StartLine": 2,
+                "Secret": "sk-live-abcdef123456",
+                "Match": "api_key = 'sk-live-abcdef123456'",
+            }
+        ]
+    ).encode()
+    calls: list = []
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        calls.append(list(argv))
+        if Path(str(argv[0])).name == "gitleaks":
+            arglist = list(argv)
+            assert arglist[arglist.index("--report-path") + 1] == str(report)
+            Path(str(report)).write_bytes(leaks)
+            return FakeProcess(b"INF scanned (stdout carries logs only)", 1)
+        if Path(str(argv[0])).name == "betterleaks":
+            raise FileNotFoundError("betterleaks")
+        return FakeProcess(b'{"results": []}', 0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
+    assert any(f["rule_id"] == "generic-api-key" for f in result["findings"])
+    assert not report.exists()
+
+
+def test_gitleaks_missing_report_surfaces_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/local/bin/gitleaks" if name == "gitleaks" else None
+    )
+    calls: list = []
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        calls.append(list(argv))
+        if Path(str(argv[0])).name == "betterleaks":
+            raise FileNotFoundError("betterleaks")
+        if Path(str(argv[0])).name == "gitleaks":
+            return FakeProcess(b"INF scanned (stdout carries logs only)", 1)
+        return FakeProcess(b'{"results": []}', 0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
+    assert result["status"] == "ok"
+    assert result["errors"]["betterleaks"] == "failed"
 
 
 def test_secrets_both_absent_records_not_installed(

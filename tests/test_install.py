@@ -16,6 +16,14 @@ def load_install():
     return mod
 
 
+def load_external():
+    sys.path.insert(0, str(SCRIPTS))
+    import install_external
+
+    importlib.reload(install_external)
+    return install_external
+
+
 install = load_install()
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
@@ -99,6 +107,27 @@ def test_check_delegates_to_verifier(monkeypatch) -> None:
     assert install.run_check(False, install.detect_platform(), False) == 0
     monkeypatch.setattr(shutil, "which", lambda name: None if name == "syft" else real_which(name))
     assert install.run_check(False, install.detect_platform(), False) == 1
+
+
+def test_check_binaries_gitleaks_satisfies_betterleaks(monkeypatch) -> None:
+    ext = load_external()
+    monkeypatch.setattr(shutil, "which", lambda name: "/fake/gitleaks" if name == "gitleaks" else None)
+    assert ext.check_binaries(["betterleaks"]) == []
+    assert ext.check_binaries(["betterleaks", "syft"]) == ["bin:syft (see tools-manifest.json)"]
+
+
+def test_check_binaries_betterleaks_itself_satisfies(monkeypatch) -> None:
+    ext = load_external()
+    monkeypatch.setattr(shutil, "which", lambda name: "/fake/betterleaks" if name == "betterleaks" else None)
+    assert ext.check_binaries(["betterleaks"]) == []
+
+
+def test_check_binaries_neither_present_still_missing(monkeypatch) -> None:
+    ext = load_external()
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    missing = ext.check_binaries(["betterleaks"])
+    assert len(missing) == 1
+    assert "betterleaks" in missing[0] and "gitleaks" in missing[0]
 
 
 def test_check_on_windows_warns_not_fails_for_guarddog(monkeypatch, capsys) -> None:

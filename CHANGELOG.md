@@ -95,6 +95,28 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   see `docs/DOCKER_PROOF.md`.
 
 ### Fixed
+- Z1 final-100 blockers (`feature/bravoguard-final-100`):
+  - `rules/frontend/dangerous-html.yaml`: the bare
+    `dangerouslySetInnerHTML={{ __html: ... }}` scalar broke YAML parsing
+    (validate exit 5, 0 rules loaded — SAST-semgrep lane blind). The rule
+    now quotes a real JSX sink pattern plus the `$EL.innerHTML = $HTML`
+    sink under `pattern-either`; still 2 rules, CWE-79 x2, with
+    `cwe`/`owasp_2025`/`fix_hint` metadata. Live proof: `el.innerHTML = x`
+    and `dangerouslySetInnerHTML={{ __html: ... }}` both fire.
+  - `scripts/install_external.py`: `check_binaries` accepts the gitleaks v8
+    fallback for `betterleaks` (mirrors the orchestrator R2 fallback), so
+    `install.py --check` passes with gitleaks on PATH; strict otherwise.
+  - `src/bravoguard/cli.py`: `doctor` demotes a missing `guarddog` to WARN
+    on win32 (same wording as the installer: nono-py fails to build on
+    Windows; Linux path unaffected) and exits 0 when it is the sole missing
+    item; Linux/macOS still FAIL. `tools` shows SKIP for guarddog on win32.
+  - `src/bravoguard/orchestrator.py`: the gitleaks fallback leg captures
+    findings via an explicit `--report-path` tmpfile (this versionless
+    build prints only logs to stdout — verified live; clean scans write
+    `[]`). The file is read once then deleted, contents never logged;
+    betterleaks primary argv, Secret/Match redaction, and empty-guards
+    unchanged. Covered by report-capture, tmpfile-deletion, and
+    missing-report-`failed` tests.
 - F1 self-findings (`feature/bravoguard-self-findings`,
   `src/bravoguard/cli.py` + `tests/test_docker.py` + `tests/test_cli.py`):
   B108 gone — the docker proof-log gate asserts on the `proof.log` basename
