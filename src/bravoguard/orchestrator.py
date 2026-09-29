@@ -167,6 +167,7 @@ __all__ = [
     "OXLINT_ENGINE",
     "SEMGREP_ENGINE",
     "TRIVY_ENGINE",
+    "materialize_base",
     "normalize_bandit",
     "normalize_betterleaks",
     "normalize_checkov",
@@ -485,6 +486,25 @@ def _unique_filename(name: str, used: set[str]) -> str:
     final = f"{stem}_{counter}{suffix}"
     used.add(final)
     return final
+
+
+def materialize_base() -> Path:
+    """Repo-local base dir for diff materialization, with system-temp fallback.
+
+    ``<cwd>/.bravoguard/tmp/`` keeps semgrep off the system temp tree, where
+    scans hang on Windows (>120s on %TEMP% vs ~0.3s repo-local,
+    parent-verified). Falls back to :func:`tempfile.gettempdir` when the
+    repo-local dir cannot be created or fails a write probe. Same rule on
+    every platform; no platform branches.
+    """
+    try:
+        candidate = Path.cwd() / ".bravoguard" / "tmp"
+        candidate.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(prefix=".probe-", dir=str(candidate), delete=True):
+            pass
+        return candidate
+    except OSError:
+        return Path(tempfile.gettempdir())
 
 
 def materialize_diff_files(
@@ -969,7 +989,10 @@ async def scan_diff(
     are fully-degraded results (all scanners not-installed). Files matching
     ``exclude`` (default :data:`DEFAULT_EXCLUDES`) are never materialized,
     and the secrets lane reads the exclude-filtered diff (skipped entirely
-    when nothing survives the filter).
+    when nothing survives the filter). The diff is materialized under
+    :func:`materialize_base` (repo-local ``.bravoguard/tmp/`` when writable,
+    system temp otherwise); the tree is always removed afterwards, even on
+    scanner error or timeout, so finding content never lingers.
     """
     if not diff or not diff.strip():
         return {"status": "empty-diff", "findings": []}
@@ -984,8 +1007,8 @@ async def scan_diff(
         if hit is not None:
             return hit
     budget = timeout if timeout and timeout > 0 else DIFF_TIMEOUT_SECONDS
-    with tempfile.TemporaryDirectory(prefix="bravoguard-diff-") as tmp:
-        workdir = Path(tmp)
+    workdir = Path(tempfile.mkdtemp(prefix="bravoguard-diff-", dir=str(materialize_base())))
+    try:
         materialize_diff_files(diff, workdir, excludes)
         filtered = _filter_diff(diff, excludes)
         secrets_job = (
@@ -999,6 +1022,8 @@ async def scan_diff(
             ("betterleaks", secrets_job),
         ]
         result = await _collect(jobs)
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
     if not _is_fully_degraded(result, len(jobs)):
         _store_scan_cache(cache, key, result.get("findings"), cache_ttl, result.get("errors"))
     return result

@@ -95,6 +95,20 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   see `docs/DOCKER_PROOF.md`.
 
 ### Fixed
+- L1 diff-materializer base (`feature/bravoguard-local-materialize`,
+  `src/bravoguard/orchestrator.py` + `tests/test_orchestrator.py` +
+  `.gitignore`): `scan_diff` materializes under the new `materialize_base()`
+  helper — `<cwd>/.bravoguard/tmp/` when writable (server cwd is the repo
+  under `uv --directory` spawn; `.bravoguard/` added to `.gitignore`), system
+  temp otherwise (same rule on every platform, no branches). Motive
+  (parent-verified): semgrep 1.178 on a `%TEMP%` tree hangs >120s while the
+  same tree repo-local scans in ~0.3s, so every real `scan_diff`
+  transport-timed-out via MCP once Z1 made `rules/` valid. The materialized
+  tree is now always removed afterwards, even on scanner error/timeout, so
+  finding content never lingers. Exclude filtering, cache keys, timeouts,
+  and argv shapes unchanged. Covered by base-selection
+  (writable/mkdir-fail/probe-fail), cleanup-on-timeout (hanging fake), and
+  repo-local e2e (fakes capture the materialized path) tests.
 - Z1 final-100 blockers (`feature/bravoguard-final-100`):
   - `rules/frontend/dangerous-html.yaml`: the bare
     `dangerouslySetInnerHTML={{ __html: ... }}` scalar broke YAML parsing

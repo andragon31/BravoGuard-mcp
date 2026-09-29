@@ -447,3 +447,76 @@ def test_secrets_argv_flags_identical_for_both_engines() -> None:
         orchestrator.betterleaks_path_argv("repo", "gitleaks")[1:]
         == orchestrator.betterleaks_path_argv("repo")[1:]
     )
+
+
+def _cwd_to(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    monkeypatch.setattr(Path, "cwd", classmethod(lambda cls: root))
+
+
+def test_materialize_base_prefers_repo_local_when_writable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cwd_to(monkeypatch, tmp_path)
+    base = orchestrator.materialize_base()
+    assert base == tmp_path / ".bravoguard" / "tmp"
+    assert base.is_dir()
+
+
+def test_materialize_base_falls_back_when_mkdir_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cwd_to(monkeypatch, tmp_path)
+    real_mkdir = Path.mkdir
+
+    def fail_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        if self == tmp_path / ".bravoguard" / "tmp":
+            raise OSError("read-only mount")
+        real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_mkdir)
+    assert orchestrator.materialize_base() == Path(tempfile.gettempdir())
+
+
+def test_materialize_base_falls_back_when_probe_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cwd_to(monkeypatch, tmp_path)
+
+    def fail_probe(**kwargs: object) -> object:
+        raise OSError("not writable")
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", fail_probe)
+    assert orchestrator.materialize_base() == Path(tempfile.gettempdir())
+
+
+def test_scan_diff_materializes_under_repo_local_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cwd_to(monkeypatch, tmp_path)
+    calls: list = []
+    install_fake(
+        monkeypatch,
+        quiet_responses(semgrep=(semgrep_pickle_payload(), 1)),
+        calls,
+    )
+    result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
+    assert result["status"] == "ok"
+    assert len(result["findings"]) >= 1
+    target = Path(calls[0][0][-1])
+    assert target.is_relative_to(tmp_path / ".bravoguard" / "tmp")
+    assert not target.exists()
+    assert list((tmp_path / ".bravoguard" / "tmp").glob("bravoguard-diff-*")) == []
+
+
+def test_scan_diff_cleans_materialized_tree_on_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _cwd_to(monkeypatch, tmp_path)
+    hanging = FakeProcess(b"", hang=True)
+    calls: list = []
+    install_fake(monkeypatch, quiet_responses(semgrep=hanging), calls)
+    result = asyncio.run(orchestrator.scan_diff(SEED_DIFF, timeout=0.05))
+    assert result["status"] == "ok"
+    assert result["errors"]["sast"] == "timeout"
+    assert hanging.killed
+    assert list((tmp_path / ".bravoguard" / "tmp").glob("bravoguard-diff-*")) == []
