@@ -26,8 +26,10 @@ def test_dockerfile_installs_guarddog_without_skip() -> None:
 def test_proof_script_covers_all_gates() -> None:
     text = read("proof-linux.sh")
     for gate in ("pytest", "ruff", "scripts/install.py --check",
-                 "bravoguard doctor", "scan_diff", "osv_lookup", "/tmp/proof.log"):
+                 "bravoguard doctor", "scan_diff", "osv_lookup", "proof.log"):
         assert gate in text, f"missing gate: {gate}"
+    # B108: basename (not /tmp path) — container-internal log path, not a secret.
+    assert "LOG=" in text, "missing LOG assignment for proof.log"
 
 
 def test_proof_script_seeded_diff_expects_finding() -> None:

@@ -72,6 +72,19 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   see `docs/DOCKER_PROOF.md`.
 
 ### Fixed
+- F1 self-findings (`feature/bravoguard-self-findings`,
+  `src/bravoguard/cli.py` + `tests/test_docker.py` + `tests/test_cli.py`):
+  B108 gone — the docker proof-log gate asserts on the `proof.log` basename
+  plus the script's `LOG=` assignment instead of the `/tmp/proof.log`
+  literal (container-internal log path, not a secret; contract kept honest).
+  B310 gone — `fetch_latest_release` passes its URL through the new
+  `_check_release_url` allow-list (`http`/`https` only; `file:`/custom
+  schemes raise `ValueError`, no silent fallback) with timeout + error
+  handling unchanged; the audited `urlopen` call carries `# nosec: B310`
+  (bandit flags the call syntactically and cannot see the prior check).
+  Covered by `test_release_url_rejects_non_http_schemes` (file/gopher/ftp
+  rejected, http/https pass) and `test_fetch_latest_release_https_proceeds`
+  (mocked `urlopen`, https URL + timeout preserved).
 - E1 engine-side `exclude` enforcement (`feature/bravoguard-exclude-fix`,
   `src/bravoguard/orchestrator.py` + `tests/test_exclude.py`): `exclude`
   (default `DEFAULT_EXCLUDES`, now including `.venv/`) previously affected

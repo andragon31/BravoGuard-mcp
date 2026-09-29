@@ -19,6 +19,7 @@ import sqlite3
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from bravoguard import __version__
 
@@ -86,14 +87,25 @@ def cmd_version(check: bool = False) -> int:
     return 0
 
 
+RELEASE_URL_SCHEMES = ("http", "https")
+
+
+def _check_release_url(url: str) -> str:
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in RELEASE_URL_SCHEMES:
+        raise ValueError(f"refusing release-check URL with non-http(s) scheme: {scheme!r}")
+    return url
+
+
 def fetch_latest_release() -> str | None:
     import os
 
     repo = os.environ.get("BRAVO_GITHUB_REPO", GITHUB_REPO)
-    url = f"https://api.github.com/repos/{repo}/releases/latest"
+    url = _check_release_url(f"https://api.github.com/repos/{repo}/releases/latest")
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "bravoguard-cli", "Accept": "application/vnd.github+json"})
-        with urllib.request.urlopen(req, timeout=10) as r:
+        # Audited: release URL scheme allow-listed http/https by _check_release_url above.
+        with urllib.request.urlopen(req, timeout=10) as r:  # nosec: B310
             return json.loads(r.read().decode()).get("tag_name")
     except (OSError, ValueError):
         return None
