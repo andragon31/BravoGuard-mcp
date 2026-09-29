@@ -98,8 +98,11 @@ import contextlib
 import fnmatch
 import hashlib
 import json
+import os
 import shlex
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -419,6 +422,24 @@ def checkov_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None
     return argv
 
 
+def _kill_tree(proc: Any) -> None:
+    """Best-effort whole-tree kill for a timed-out scanner process."""
+    pid = getattr(proc, "pid", None)
+    if pid is None:
+        return
+    if os.name == "nt":
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["taskkill.exe", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+    else:
+        with contextlib.suppress(Exception):
+            os.killpg(pid, signal.SIGKILL)
+
+
 async def run_scanner_json(
     argv: list[str],
     *,
@@ -443,6 +464,7 @@ async def run_scanner_json(
             stdin=asyncio.subprocess.PIPE if input_data is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
     except FileNotFoundError:
         raise ScannerMissingError(binary) from None
@@ -451,6 +473,7 @@ async def run_scanner_json(
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(input_data), timeout)
     except TimeoutError:
+        _kill_tree(proc)
         with contextlib.suppress(ProcessLookupError, OSError):
             proc.kill()
         with contextlib.suppress(ProcessLookupError, OSError, TimeoutError):

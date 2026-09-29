@@ -2,7 +2,10 @@
 
 import asyncio
 import json
+import os
 import shutil
+import signal
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Self
@@ -520,3 +523,87 @@ def test_scan_diff_cleans_materialized_tree_on_timeout(
     assert result["errors"]["sast"] == "timeout"
     assert hanging.killed
     assert list((tmp_path / ".bravoguard" / "tmp").glob("bravoguard-diff-*")) == []
+
+
+def _patch_hanging_fake(monkeypatch: pytest.MonkeyPatch, binary: str, proc: FakeProcess, calls: list) -> None:
+    """Patch spawn to return ``proc`` for ``binary`` without touching Path.
+
+    The shared ``install_fake`` resolves names via ``Path(...).name``, which
+    breaks while ``os.name`` is spoofed cross-platform (Path dispatches on
+    ``os.name``), so tree-kill tests use this exact-match fake instead.
+    """
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        calls.append((list(argv), dict(kwargs)))
+        assert "shell" not in kwargs, "scanners must never run with shell=True"
+        assert argv[0] == binary
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+
+
+def test_timeout_kills_tree_on_win32(monkeypatch: pytest.MonkeyPatch) -> None:
+    taskkill_calls: list = []
+    run_kwargs: list = []
+
+    def fake_run(argv: object, **kwargs: object) -> object:
+        taskkill_calls.append(list(argv))  # type: ignore[arg-type]
+        run_kwargs.append(dict(kwargs))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+    hanging = FakeProcess(b"", hang=True)
+    hanging.pid = 4242  # type: ignore[attr-defined]
+    calls: list = []
+    _patch_hanging_fake(monkeypatch, "fake-scanner", hanging, calls)
+    real_name = os.name
+    os.name = "nt"  # type: ignore[assignment]
+    try:
+        with pytest.raises(orchestrator.ScannerTimeoutError):
+            asyncio.run(orchestrator.run_scanner_json(["fake-scanner"], input_data=None, timeout=0.05))
+    finally:
+        os.name = real_name  # type: ignore[assignment]
+    assert taskkill_calls == [["taskkill.exe", "/F", "/T", "/PID", "4242"]]
+    assert all("shell" not in kwargs for kwargs in run_kwargs)
+    assert hanging.killed
+    assert calls[0][1].get("start_new_session") is True
+
+
+def test_timeout_killpg_shape_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    killpg_calls: list = []
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: killpg_calls.append((pid, sig)), raising=False)
+    sigkill = getattr(signal, "SIGKILL", 9)
+    monkeypatch.setattr(signal, "SIGKILL", sigkill, raising=False)
+    hanging = FakeProcess(b"", hang=True)
+    hanging.pid = 4243  # type: ignore[attr-defined]
+    calls: list = []
+    _patch_hanging_fake(monkeypatch, "fake-scanner", hanging, calls)
+    real_name = os.name
+    os.name = "posix"  # type: ignore[assignment]
+    try:
+        with pytest.raises(orchestrator.ScannerTimeoutError):
+            asyncio.run(orchestrator.run_scanner_json(["fake-scanner"], input_data=None, timeout=0.05))
+    finally:
+        os.name = real_name  # type: ignore[assignment]
+    assert killpg_calls == [(4243, sigkill)]
+    assert calls[0][1].get("start_new_session") is True
+    assert hanging.killed
+
+
+def test_timeout_fallback_when_taskkill_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing_run(argv: object, **kwargs: object) -> object:
+        raise FileNotFoundError("taskkill.exe")
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", missing_run)
+    hanging = FakeProcess(b"", hang=True)
+    hanging.pid = 4244  # type: ignore[attr-defined]
+    calls: list = []
+    _patch_hanging_fake(monkeypatch, "fake-scanner", hanging, calls)
+    real_name = os.name
+    os.name = "nt"  # type: ignore[assignment]
+    try:
+        with pytest.raises(orchestrator.ScannerTimeoutError):
+            asyncio.run(orchestrator.run_scanner_json(["fake-scanner"], input_data=None, timeout=0.05))
+    finally:
+        os.name = real_name  # type: ignore[assignment]
+    assert hanging.killed
