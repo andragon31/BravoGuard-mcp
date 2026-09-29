@@ -170,6 +170,7 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   1.178.0 + bandit 1.9.4 (`uv tool install`), osv-scanner 2.0.3 + gitleaks
   v8.28.0 fallback (`go install`, GOBIN `~/.local/bin`); guarddog blocked by
   a `nono-py` build failure on Windows (honest partial, evidence in task).
+- oxlint no-files false-failure (`feature/bravoguard-multi-lane`, `src/bravoguard/orchestrator.py` + `tests/test_lanes.py`): py-only targets exited 1 with `No files found...` on stdout ahead of a valid empty-diagnostics envelope, which failed JSON parsing and reported `errors={'oxlint': 'failed'}` — the lane now strips a leading non-JSON preamble and lets a parseable envelope win over rc (empty diagnostics -> `ok`/empty; findings unchanged; garbage stdout still `failed`; same output-driven tolerance may later apply to trivy/checkov, out of scope).
 
 ## [V3] — venv-proof gap fixes
 

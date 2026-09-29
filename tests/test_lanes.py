@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from bravoguard import orchestrator
-from bravoguard.orchestrator import FINDING_KEYS
+from bravoguard.orchestrator import FINDING_KEYS, OrchestratorError
 
 OXLINT_PAYLOAD = {
     "diagnostics": [
@@ -358,3 +358,45 @@ def test_scan_repo_new_lanes_missing_degrades_to_not_installed(
         "trivy": "not-installed",
         "checkov": "not-installed",
     }
+
+
+OXLINT_NO_FILES_STDOUT = (
+    b"No files found to lint. Please check your paths and ignore patterns.\n"
+    + json.dumps({"diagnostics": [], "number_of_files": 0, "number_of_rules": 95}).encode()
+)
+
+
+def test_scan_repo_oxlint_no_files_returns_ok_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """oxlint rc=1 with preamble + empty envelope is ok/empty, not failed."""
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        names = {Path(str(a)).name for a in argv} | set(argv)
+        if "oxlint" in names:
+            return FakeProcess(OXLINT_NO_FILES_STDOUT, 1)
+        if "trivy" in names:
+            return FakeProcess(b"{}", 0)
+        if "checkov" in names:
+            return FakeProcess(json.dumps(CHECKOV_SUMMARY_ONLY).encode(), 0)
+        name = Path(str(argv[0])).name
+        quiet = {"semgrep": b'{"results": []}', "bandit": b'{"results": []}', "betterleaks": b"[]"}
+        if name in quiet:
+            return FakeProcess(quiet[name], 0)
+        raise FileNotFoundError(name)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    result = asyncio.run(orchestrator.scan_repo(str(tmp_path)))
+    assert result == {"status": "ok", "findings": []}
+
+
+def test_oxlint_garbage_stdout_still_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """oxlint rc=1 with unparsable stdout keeps the failed lane error."""
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        return FakeProcess(b"oxlint crashed: boom { not json", 1)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    with pytest.raises(OrchestratorError):
+        asyncio.run(orchestrator._run_oxlint("target", 10))

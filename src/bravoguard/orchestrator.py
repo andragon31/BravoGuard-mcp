@@ -375,13 +375,19 @@ def checkov_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None
 
 
 async def run_scanner_json(
-    argv: list[str], *, input_data: bytes | None, timeout: float
+    argv: list[str],
+    *,
+    input_data: bytes | None,
+    timeout: float,
+    parse: Callable[[str], Any] | None = None,
 ) -> dict[str, Any] | list[Any]:
     """Run one scanner and parse its stdout as JSON.
 
     Never uses a shell; the whole call is bounded by ``timeout``. Non-zero
     exits are normal when findings exist, so stdout is parsed regardless of
     return code. Scanner output is never logged or put into exceptions.
+    ``parse`` overrides the JSON decode for lanes with noisy stdout (oxlint
+    only); it must raise ``json.JSONDecodeError`` on garbage.
     """
     if not argv:
         raise OrchestratorError("empty scanner argv")
@@ -410,7 +416,10 @@ async def run_scanner_json(
             raise OrchestratorError(f"scanner failed: {binary}")
         return {}
     try:
-        return json.loads(stdout.decode("utf-8", errors="replace"))
+        text = stdout.decode("utf-8", errors="replace")
+        if parse is not None:
+            return parse(text)
+        return json.loads(text)
     except (json.JSONDecodeError, UnicodeError):
         raise OrchestratorError(f"scanner returned invalid JSON: {binary}") from None
 
@@ -558,12 +567,35 @@ async def _run_bandit(
     return "bandit", payload
 
 
+def _parse_oxlint_stdout(text: str) -> Any:
+    """Parse oxlint stdout, skipping a leading non-JSON preamble line.
+
+    With zero lintable files oxlint exits 1 printing ``No files found...``
+    to stdout ahead of the valid envelope; first parse wins, the retry from
+    the first ``{`` lets that envelope through. Garbage re-raises, keeping
+    the lane ``failed``.
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        return json.loads(text[start:] if start >= 0 else text)
+
+
 async def _run_oxlint(
     target: str, timeout: float, exclude: tuple[str, ...] = ()
 ) -> tuple[str, Any]:
-    """Frontend lane: missing oxlint (or cmd) degrades to not-installed."""
+    """Frontend lane: missing oxlint (or cmd) degrades to not-installed.
+
+    Rule: a parseable envelope wins over rc (empty diagnostics -> ok/empty,
+    findings normalize as before); unparsable stdout stays ``failed``. Same
+    output-driven tolerance may later apply to trivy/checkov (out of scope).
+    """
     payload = await run_scanner_json(
-        oxlint_argv(target, exclude), input_data=None, timeout=timeout
+        oxlint_argv(target, exclude),
+        input_data=None,
+        timeout=timeout,
+        parse=_parse_oxlint_stdout,
     )
     return "oxlint", payload
 
