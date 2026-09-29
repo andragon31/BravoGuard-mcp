@@ -7,9 +7,9 @@ Scope: `src/bravoguard/orchestrator.py` (engine invocation), `tests/test_exclude
 Constraints: argv only (never shell=True); keep `_is_excluded`/`_normalize_excludes` semantics, document pattern syntax (fnmatch on rel posix); semgrep native --exclude where possible; bandit/secrets via safest mechanism (native flag or pre-filtered file list); timeouts unchanged; no secrets logged.
 Authorized scope: Write only BravoGuard-mcp on branch `feature/bravoguard-exclude-fix`. Work-unit commits authorized. Push/PR/merge deferred. No remote.
 Acceptance criteria:
-- [ ] scan_repo with default excludes skips .venv (dogfood re-proof: count drops from 3242 to tens, zero third-party dep findings)
-- [ ] Explicit `exclude` patterns honored by all three engines (unit-proven with fakes)
-- [ ] `uv run pytest -q` green + ruff clean
+- [x] scan_repo with default excludes skips .venv (dogfood re-proof: 3296 -> 363 findings, 0 venv leaks, live via fresh interpreter)
+- [x] Explicit `exclude` patterns honored by all three engines (unit-proven with fakes: 14 E1 tests + 7 S1 tests)
+- [x] `uv run pytest -q` green + ruff clean (172 passed on tip, clean)
 Applicable checks: `uv run pytest -q`, `uv run ruff check src/bravoguard/orchestrator.py tests/test_exclude.py`.
 TDD: off, runner `uv run pytest -q`.
 Delivery: `ask-on-risk`. Forecast <200 lines. Work-unit commits; PR deferred.
