@@ -129,6 +129,17 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   Host runners gate on `docker info` first (exit 2 honest-blocked when the
   daemon is down). Contract-tested without a daemon (`tests/test_docker.py`);
   see `docs/DOCKER_PROOF.md`.
+- B1 release binaries (`feature/bravoguard-release-bins`,
+  `scripts/install.py` + `tests/test_install.py`): Go-unfriendly tools now
+  install from official GitHub release binaries (stdlib
+  urllib/tarfile/zipfile only, per-platform asset matrix, single binary
+  unpacked into `~/.local/bin` with `chmod +x` on POSIX, `INSTALL_TIMEOUT`
+  on downloads). trivy/trufflehog try release first, then the existing go
+  candidate, then manual; syft/grype keep their proven go install first
+  with the release as fallback (same helper). trufflehog `v3.95.x` resolves
+  to the newest exact patch via the GitHub releases API at install time and
+  degrades to go/manual offline without crashing. Dry-run prints the new
+  chains readably (`release: <tool> <version> from https://...`).
 
 ### Fixed
 - C1 own-code cache invalidation (`feature/bravoguard-cache-version`,
@@ -256,6 +267,7 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
 - L3 scan_diff SAST gitignore-skip (`feature/bravoguard-local-materialize`, `src/bravoguard/orchestrator.py` + `tests/test_exclude.py`): `scan_diff` passes the explicit materialized file list to semgrep/opengrep instead of the workdir (semgrep skips gitignored `.bravoguard/tmp` trees; explicit files bypass); empty list returns ok/empty without spawning, repo dir-scans unchanged.
 - S1 scan_repo SAST file-list (`feature/bravoguard-sast-filelist`, `src/bravoguard/orchestrator.py` + `tests/test_exclude.py`): `scan_repo` passes explicit pre-filtered file lists to semgrep/opengrep instead of the raw dir (semgrep-core exits -1 "Failed to obtain target files" enumerating hostile media-heavy trees; explicit files bypass, same class as the L3 fix). New `_enumerate_sast_files` collects only `SAST_FILE_EXTENSIONS` (`.py/.pyi/.js/.jsx/.ts/.tsx/.mjs/.cjs`, matching `rules/` python + javascript/typescript languages) via the single `_is_excluded` matcher, skipping non-regular entries (`is_file() and not is_symlink()`, `.git` never descended). New `_scan_sast_repo_files` chunks at `SAST_FILES_PER_SCAN` (100) sharing the lane budget evenly, merging chunk `results`/`errors`; empty candidates return ok/empty without spawning. A chunk timeout aborts remaining chunks and keeps findings-so-far with an honest `timeout` error (via `_SastPartialTimeout`, handled in `_collect`). `--exclude` flags stay on every argv (defense in depth), opengrep fallback is per-chunk identical, cache keys unchanged (candidate set is a pure function of target content + excludes, both already digested). `scan_diff` untouched (already explicit files). Two older `scan_repo` assertions updated to expect files instead of the raw dir.
 - K1 timeout tree-kill (`feature/bravoguard-tree-kill`, `src/bravoguard/orchestrator.py` + `tests/test_orchestrator.py`): `run_scanner_json` no longer kills only the direct child on timeout (parent-proven: semgrep-core grandchildren survived as CPU-burning orphans). New `_kill_tree` helper runs best-effort before the existing `proc.kill()`/`wait()` fallback: Windows (`os.name == "nt"`) invokes `taskkill.exe /F /T /PID <pid>` via argv (never `shell=True`, all errors suppressed); POSIX kills the process group (`start_new_session=True` at spawn + `os.killpg(pid, SIGKILL)`, suppressed, fallback unchanged). `ScannerTimeoutError` still raised; success/fast-failure paths unchanged. Covered by win32 taskkill-argv, POSIX killpg-shape, and taskkill-missing-fallback fake-proc tests.
+- B1 go module roots (`feature/bravoguard-release-bins`, `scripts/install.py`): syft/grype used the repository roots instead of the `/cmd/...` build roots — now `github.com/anchore/syft/cmd/syft` and `github.com/anchore/grype/cmd/grype` (version handling unchanged).
 
 ## [V3] — venv-proof gap fixes
 

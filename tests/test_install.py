@@ -1,9 +1,12 @@
 """Installer unit tests: platform dispatch mocked, dry-run never mutates."""
 
 import importlib.util
+import io
 import json
 import shutil
 import sys
+import tarfile
+import zipfile
 from pathlib import Path
 
 
@@ -234,3 +237,225 @@ def test_execute_plan_resolves_cmd_shim_target(monkeypatch, capsys) -> None:
     assert install.execute_plan([action]) == 0
     assert seen == [["cmd", "/c", "scoop", "install", "syft"]]
     assert "OK syft" in capsys.readouterr().out
+
+
+def test_go_modules_use_cmd_roots() -> None:
+    assert install.GO_MODULES["syft"] == "github.com/anchore/syft/cmd/syft"
+    assert install.GO_MODULES["grype"] == "github.com/anchore/grype/cmd/grype"
+    plan = {a.tool: a for a in install.build_plan("linux", True, False)}
+    syft_go = [c for c in plan["syft"].candidates if c[0] == "go"]
+    assert syft_go == [["go", "install", "github.com/anchore/syft/cmd/syft@v1.51.1"]]
+    grype_go = [c for c in plan["grype"].candidates if c[0] == "go"]
+    assert grype_go == [["go", "install", "github.com/anchore/grype/cmd/grype@v0.118.0"]]
+
+
+def test_release_asset_names_per_platform() -> None:
+    assert install.release_asset("trivy", "linux", "0.74.0") == "trivy_0.74.0_Linux-64bit.tar.gz"
+    assert install.release_asset("trivy", "windows", "0.74.0") == "trivy_0.74.0_windows-64bit.zip"
+    assert install.release_asset("trivy", "macos", "0.74.0") == "trivy_0.74.0_macOS-64bit.tar.gz"
+    assert install.release_asset("trufflehog", "linux", "v3.95.9") == "trufflehog_3.95.9_linux_amd64.tar.gz"
+    assert install.release_asset("trufflehog", "windows", "v3.95.9") == "trufflehog_3.95.9_windows_amd64.tar.gz"
+    assert install.release_asset("trufflehog", "macos", "v3.95.9") == "trufflehog_3.95.9_darwin_amd64.tar.gz"
+    assert install.release_asset("syft", "linux", "1.51.1") == "syft_1.51.1_linux_amd64.tar.gz"
+    assert install.release_asset("syft", "windows", "1.51.1") == "syft_1.51.1_windows_amd64.zip"
+    assert install.release_asset("syft", "macos", "1.51.1") == "syft_1.51.1_darwin_amd64.tar.gz"
+    assert install.release_asset("grype", "linux", "0.118.0") == "grype_0.118.0_linux_amd64.tar.gz"
+    assert install.release_asset("grype", "windows", "0.118.0") == "grype_0.118.0_windows_amd64.zip"
+    assert install.release_asset("grype", "macos", "0.118.0") == "grype_0.118.0_darwin_amd64.tar.gz"
+
+
+def test_release_url_uses_v_tag() -> None:
+    url = install.release_url("aquasecurity/trivy", "0.74.0", "trivy_0.74.0_windows-64bit.zip")
+    assert url == "https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_windows-64bit.zip"
+    assert install.release_tag("v3.95.9") == "v3.95.9"
+    assert install.release_tag("0.74.0") == "v0.74.0"
+
+
+class _FakeAPI:
+    def __init__(self, payload: bytes) -> None:
+        self._stream = io.BytesIO(payload)
+
+    def __enter__(self):
+        return self._stream
+
+    def __exit__(self, *args) -> bool:
+        return False
+
+
+def test_resolve_trufflehog_picks_newest_patch(monkeypatch) -> None:
+    payload = json.dumps([{"tag_name": "v3.95.9"}, {"tag_name": "v3.95.8"}, {"tag_name": "v3.94.0"}]).encode()
+    monkeypatch.setattr(install.urllib.request, "urlopen", lambda *a, **k: _FakeAPI(payload))
+    assert install.resolve_trufflehog_version("v3.95.x") == "v3.95.9"
+
+
+def test_resolve_trufflehog_offline_returns_none(monkeypatch) -> None:
+    def _down(*args, **kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(install.urllib.request, "urlopen", _down)
+    assert install.resolve_trufflehog_version("v3.95.x") is None
+
+
+def test_resolve_trufflehog_exact_needs_no_network(monkeypatch) -> None:
+    def _boom(*args, **kwargs):
+        raise AssertionError("exact pins must not hit the network")
+
+    monkeypatch.setattr(install.urllib.request, "urlopen", _boom)
+    assert install.resolve_trufflehog_version("v3.95.9") == "v3.95.9"
+
+
+def _make_tar_gz(path: Path, members: dict[str, bytes]) -> None:
+    path.write_bytes(_tar_bytes(members))
+
+
+def _tar_bytes(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data in members.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+def test_extract_release_binary_tar_gz(tmp_path) -> None:
+    archive = tmp_path / "trivy.tar.gz"
+    _make_tar_gz(archive, {"trivy": b"fake-trivy"})
+    dest = tmp_path / "bin"
+    assert install.extract_release_binary(archive, dest, "trivy") is True
+    expected = "trivy.exe" if install.detect_platform() == "windows" else "trivy"
+    assert (dest / expected).read_bytes() == b"fake-trivy"
+
+
+def test_extract_release_binary_zip(tmp_path) -> None:
+    archive = tmp_path / "trivy.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("trivy.exe", b"fake-trivy-exe")
+    dest = tmp_path / "bin"
+    assert install.extract_release_binary(archive, dest, "trivy") is True
+    assert (dest / "trivy.exe").read_bytes() == b"fake-trivy-exe"
+
+
+def test_extract_ignores_path_traversal(tmp_path) -> None:
+    archive = tmp_path / "evil.tar.gz"
+    _make_tar_gz(archive, {"../evil": b"nope", "trivy": b"real"})
+    dest = tmp_path / "bin"
+    assert install.extract_release_binary(archive, dest, "trivy") is True
+    assert not (tmp_path / "evil").exists()
+    assert dest.is_dir()
+
+
+def test_download_guards_fail_before_network(monkeypatch) -> None:
+    def _boom(*args, **kwargs):
+        raise AssertionError("guards must fail before any download")
+
+    monkeypatch.setattr(install.urllib.request, "urlopen", _boom)
+    matrix = install.RELEASE_ASSETS["trivy"]
+    assert install.download_release_binary("aquasecurity/trivy", "v3.95.x", matrix, Path(".")) is False
+    monkeypatch.setattr(install, "detect_platform", lambda *a: "plan9")
+    assert install.download_release_binary("aquasecurity/trivy", "0.74.0", matrix, Path(".")) is False
+
+
+def test_download_release_writes_binary(monkeypatch, tmp_path) -> None:
+    buf = _tar_bytes({"trivy": b"fake-trivy"})
+    monkeypatch.setattr(install.urllib.request, "urlopen", lambda *a, **k: io.BytesIO(buf))
+    plat = install.detect_platform()
+    dest = tmp_path / "bin"
+    assert install.download_release_binary("aquasecurity/trivy", "0.74.0", {plat: "fake.tar.gz"}, dest) is True
+    expected = "trivy.exe" if plat == "windows" else "trivy"
+    assert (dest / expected).read_bytes() == b"fake-trivy"
+    assert not (dest / "fake.tar.gz").exists()
+
+
+def test_download_substitutes_version_placeholder(monkeypatch, tmp_path) -> None:
+    plat = install.detect_platform()
+    if plat == "windows":
+        template, payload, binary = "pkg_{ver}.zip", _zip_bytes({"pkg.exe": b"fake"}), "pkg.exe"
+    else:
+        template, payload, binary = "pkg_{ver}.tar.gz", _tar_bytes({"pkg": b"fake"}), "pkg"
+    seen: list[str] = []
+
+    def _fake(req, **kwargs):
+        seen.append(req.full_url)
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr(install.urllib.request, "urlopen", _fake)
+    assert install.download_release_binary("example/pkg", "v9.9.9", {plat: template}, tmp_path) is True
+    expected_asset = template.format(ver="9.9.9")
+    assert seen == [f"https://github.com/example/pkg/releases/download/v9.9.9/{expected_asset}"]
+    assert (tmp_path / binary).read_bytes() == b"fake"
+
+
+def _candidate_kinds(action) -> list[str]:
+    return ["release" if c and c[0] == install.RELEASE_MARKER else c[0] for c in action.candidates]
+
+
+def test_trivy_trufflehog_release_before_go() -> None:
+    for plat in ("windows", "linux", "macos"):
+        plan = {a.tool: a for a in install.build_plan(plat, False, False)}
+        for tool in ("trivy", "trufflehog"):
+            kinds = _candidate_kinds(plan[tool])
+            assert kinds[0] == "release"
+            assert "go" in kinds and kinds.index("release") < kinds.index("go")
+        assert "github.com/trufflesecurity/trufflehog" in plan["trufflehog"].manual
+
+
+def test_syft_grype_go_before_release() -> None:
+    for plat in ("windows", "linux", "macos"):
+        plan = {a.tool: a for a in install.build_plan(plat, True, False)}
+        for tool in ("syft", "grype"):
+            kinds = _candidate_kinds(plan[tool])
+            assert "go" in kinds and "release" in kinds
+            assert kinds.index("go") < kinds.index("release")
+
+
+def test_install_release_trufflehog_offline_returns_false(monkeypatch) -> None:
+    monkeypatch.setattr(install, "resolve_trufflehog_version", lambda pinned: None)
+    assert install.install_release("trufflehog", "v3.95.x") is False
+
+
+def test_execute_plan_release_needs_no_manager(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(install, "install_release", lambda *a: True)
+    action = install.Action(
+        tool="trivy",
+        version="0.74.0",
+        candidates=[install.release_candidate("trivy", "0.74.0", "windows")],
+    )
+    assert install.execute_plan([action]) == 0
+    assert "OK trivy" in capsys.readouterr().out
+
+
+def test_execute_plan_release_failure_tries_go(monkeypatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: f"/fake/{name}")
+    calls: list[list[str]] = []
+
+    def _run(cmd, **kwargs):
+        calls.append(cmd)
+
+    monkeypatch.setattr(install, "install_release", lambda *a: False)
+    monkeypatch.setattr(install.subprocess, "run", _run)
+    action = install.Action(
+        tool="trivy",
+        version="0.74.0",
+        candidates=[install.release_candidate("trivy", "0.74.0", "linux"), ["go", "install", "x"]],
+        manual="manual: install trivy by hand",
+    )
+    assert install.execute_plan([action]) == 0
+    assert calls == [["go", "install", "x"]]
+
+
+def test_dry_run_prints_release_chain(capsys) -> None:
+    install.print_plan(install.build_plan("windows", False, False), "windows")
+    out = capsys.readouterr().out
+    assert "release: trivy 0.74.0 from https://github.com/aquasecurity/trivy/releases/download/" in out
+    assert "trivy_0.74.0_windows-64bit.zip" in out
+    assert "trufflehog v3.95.x (exact patch resolved at install)" in out
