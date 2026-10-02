@@ -34,7 +34,7 @@ def explain_cwe(cwe_id: str) -> dict:
         return {"cwe": cwe_id, "owasp_2025": "unknown", "note": "invalid CWE format"}
     category = data["cwe_map"].get(normalized)
     if category is None:
-        return {"cwe": normalized, "owasp_2025": "unknown", "note": "not in seed map, full table lands in Phase 2"}
+        return {"cwe": normalized, "owasp_2025": "unknown", "note": "unknown CWE id"}
     return {
         "cwe": normalized,
         "owasp_2025": category,

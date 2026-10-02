@@ -6,6 +6,16 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
 ## [Unreleased]
 
 ### Added
+- W1 full OWASP Top 10:2025 table (`feature/bravoguard-owasp-full`,
+  `src/bravoguard/owasp_2025.json` + `src/bravoguard/owasp_map.py` +
+  `tests/test_owasp_map.py`): `cwe_map` expanded from the 7 seed CWEs to
+  the complete official 249 (per-category 40/16/6/32/37/39/36/14/5/24,
+  verified 2026-09-30 against https://owasp.org/Top10/2025; see the
+  `coverage` provenance field). Seed entries keep exact meaning and the 7
+  seed notes are byte-identical; new entries carry no note (loader
+  defaults to ""). Loader unknown branch now reports `unknown CWE id`
+  (Phase-2 placeholder retired); invalid-format branch unchanged.
+  Note: CWE-307 maps to A07 per the official A07 list.
 - M1 multi-lane (`feature/bravoguard-multi-lane`, `src/bravoguard/orchestrator.py`
   + `src/bravoguard/normalizer.py` + `tests/test_lanes.py`): `scan_repo` fans
   out to three new lanes alongside SAST/bandit/secrets (post-normalization
