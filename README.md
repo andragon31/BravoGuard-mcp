@@ -1,5 +1,7 @@
 # BRAVOGuard
 
+[![ci](https://github.com/andragon31/BravoGuard-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/andragon31/BravoGuard-mcp/actions/workflows/ci.yml)
+
 Security-first MCP server for AI-assisted code review and vulnerability triage.
 
 ## Vision

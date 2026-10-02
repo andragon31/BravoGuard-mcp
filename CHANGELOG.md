@@ -6,6 +6,16 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
 ## [Unreleased]
 
 ### Added
+- P1 CI (`feature/bravoguard-ci-and-polish`, `.github/workflows/ci.yml`):
+  GitHub Actions on push to master + pull_request (ubuntu-latest, per-ref
+  cancel-in-progress). Four independent jobs, all hard gates: `test`
+  (`uv sync --frozen --all-extras` + `uv run pytest -q`), `lint` (Ruff
+  0.16.7 per the README Stack table + `semgrep --validate --config rules/`,
+  both isolated via `uv tool`), `install-check` (dogfoods the repo installer
+  `--install --yes` for the non-strict core plan, then `--check` must exit 0),
+  `docker-proof` (builds `docker/Dockerfile.linux-test` + runs the
+  in-container proof, 20min timeout). Ubuntu-only by design; README carries
+  the CI badge.
 - W1 full OWASP Top 10:2025 table (`feature/bravoguard-owasp-full`,
   `src/bravoguard/owasp_2025.json` + `src/bravoguard/owasp_map.py` +
   `tests/test_owasp_map.py`): `cwe_map` expanded from the 7 seed CWEs to
@@ -81,6 +91,22 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   fallback and a generic template carrying the `owasp_map` reference; output
   `{suggestion, rule_id, cwe, owasp_ref}` (`status: ok`, empty-finding guard
   preserved). No LLM calls.
+- P2 suggest templates (`feature/bravoguard-ci-and-polish`,
+  `src/bravoguard/suggest.py` + `tests/test_suggest.py`): specific templates
+  for the top remaining bandit rules, dual-keyed by `rule_id` + CWE fallback
+  (CWEs verified live against bandit 1.9.4 JSON `issue_cwe`; OWASP refs from
+  the 249-CWE table): B102 exec CWE-78 -> allowlist dispatch, B104 bind-all
+  CWE-605 -> 127.0.0.1 (OWASP unlisted, honestly `unknown`), B105/B106/B107
+  CWE-259 -> env var + rotation, B110 CWE-703 -> narrow except + logging,
+  B302 marshal + B403 pickle-import CWE-502 -> `json` (distinct import vs
+  usage notes), B303/B324 CWE-327 -> SHA-256 + password-hasher note,
+  B304/B305/B413 CWE-327 -> AES-GCM/Fernet, B310 CWE-22 -> scheme allow-list
+  (same shape as `cli._check_release_url`), B311 CWE-330 -> `secrets`,
+  B602 joins the CWE-78 argv family, B607 gets its own CWE-78 partial-path
+  template (`shutil.which` + argv), B608 CWE-89 -> parameterized queries.
+  B404 (import subprocess) intentionally keeps the generic path — the import
+  alone is not a flaw. The generic-fallback test now uses CWE-94 (CWE-89 is
+  covered). No LLM calls.
 - X1 Installer (`scripts/install.py`, ~200 lines): cross-platform
   Windows + Linux installer driven by `tools-manifest.json` pins.
   `--check` reuses `scripts/install_external.py` check functions (verifier

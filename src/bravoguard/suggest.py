@@ -45,6 +45,88 @@ SUBPROCESS_SUGGESTION = (
     "# quote with shlex.quote() only when a shell string is unavoidable"
 )
 
+EXEC_SUGGESTION = (
+    "Replace exec() on dynamic input (CWE-78) with dispatch through an "
+    "explicit allowlist of callables, or a fixed argv list with shell=False. "
+    "Parse data with ast.literal_eval(), never exec(). "
+    "Example: ALLOWED[name]()  # name checked against an allowlist first"
+)
+
+BIND_ALL_SUGGESTION = (
+    "Do not bind 0.0.0.0 (all interfaces, CWE-605): bind 127.0.0.1 for "
+    "local-only services, or make the bind address explicit configuration. "
+    'Example: sock.bind(("127.0.0.1", port))  # never "0.0.0.0" by default'
+)
+
+PASSWORD_SUGGESTION = (
+    "Remove the hard-coded password (CWE-259) and rotate it — assume it is "
+    "exposed. Read it from an environment variable or a secrets manager; "
+    "prompt with getpass for interactive use. "
+    'Example: password = os.environ["DB_PASSWORD"]  # or getpass.getpass()'
+)
+
+EXCEPT_PASS_SUGGESTION = (
+    "Do not silently pass (CWE-703): catch the narrowest exception you can "
+    "handle and log it, so failures stay visible. "
+    'Example: except (ValueError, KeyError): logger.exception("load failed")'
+)
+
+URLLIB_SUGGESTION = (
+    "Restrict urlopen to http/https (CWE-22): parse with "
+    "urllib.parse.urlparse and reject other schemes before the call — the "
+    "same allow-list shape as cli._check_release_url. "
+    'Example: if urlparse(url).scheme not in {"http", "https"}: '
+    "raise ValueError"
+)
+
+RANDOM_SUGGESTION = (
+    "Replace random with secrets for security purposes (CWE-330): the "
+    "random module is predictable. "
+    "Example: token = secrets.token_urlsafe(32)  # secrets.randbelow(n) "
+    "for ranges"
+)
+
+PARTIAL_PATH_SUGGESTION = (
+    "Resolve the executable to an absolute path (CWE-78 partial-path risk): "
+    "look it up with shutil.which() and pass an argv list with shell=False. "
+    'Example: exe = shutil.which("git"); '
+    'subprocess.run([exe, "show", safe_ref], shell=False)  '
+    "# quote with shlex.quote() only when a shell string is unavoidable"
+)
+
+SQL_SUGGESTION = (
+    "Parameterize the query (CWE-89): never interpolate values into SQL "
+    "strings — pass parameters to the driver instead. "
+    'Example: cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))'
+)
+
+HASH_SUGGESTION = (
+    "Replace MD5/SHA1 with SHA-256 for integrity (CWE-327); for passwords "
+    "use a password hasher (pbkdf2/bcrypt/argon2), never a fast digest. "
+    "Example: hashlib.sha256(data).hexdigest()  "
+    "# passwords: hashlib.pbkdf2_hmac('sha256', pw, salt, 600_000)"
+)
+
+CIPHER_SUGGESTION = (
+    "Replace DES/3DES/ECB with a modern AEAD (CWE-327): AES-GCM via the "
+    "cryptography package, with a fresh random nonce per message. "
+    "Example: from cryptography.fernet import Fernet; "
+    "Fernet(key).encrypt(data)"
+)
+
+MARSHAL_SUGGESTION = (
+    "Replace marshal.loads() on untrusted input with json.loads() "
+    "(CWE-502): marshal builds arbitrary objects like pickle. "
+    "Example: obj = json.loads(data)  # only unmarshal data you produced"
+)
+
+PICKLE_IMPORT_SUGGESTION = (
+    "The pickle import flags deserialization capability (CWE-502): keep it "
+    "only if no untrusted input reaches pickle.load/loads — prefer json for "
+    "external data. Example: obj = json.loads(data)  "
+    "# audit every pickle.load/loads call site"
+)
+
 EVAL_RULES = frozenset({"bravoguard-python-eval", "bravoguard-python-eval-exec", "b307"})
 PICKLE_RULES = frozenset({"bravoguard-python-pickle-load", "b301"})
 INNERHTML_RULES = frozenset(
@@ -58,15 +140,31 @@ INNERHTML_RULES = frozenset(
 API_KEY_RULES = frozenset({"generic-api-key"})
 SUBPROCESS_RULES = frozenset(
     {
+        "b602",
         "b603",
         "b604",
         "b605",
         "b606",
-        "b607",
         "bravoguard-python-subprocess-shell",
         "bravoguard-python-os-system",
     }
 )
+# B404 (import subprocess) intentionally has no rule entry: the import alone
+# is not a flaw (informational LOW), so it keeps the generic path. A B404
+# finding still carries CWE-78 from bandit, so the CWE-78 fallback below may
+# match it — that is pre-existing fallback behavior, not a B404 template.
+PARTIAL_PATH_RULES = frozenset({"b607"})
+EXEC_RULES = frozenset({"b102"})
+BIND_ALL_RULES = frozenset({"b104"})
+PASSWORD_RULES = frozenset({"b105", "b106", "b107"})
+EXCEPT_PASS_RULES = frozenset({"b110"})
+URLLIB_RULES = frozenset({"b310"})
+RANDOM_RULES = frozenset({"b311"})
+SQL_RULES = frozenset({"b608"})
+HASH_RULES = frozenset({"b303", "b324"})
+CIPHER_RULES = frozenset({"b304", "b305", "b413"})
+MARSHAL_RULES = frozenset({"b302"})
+PICKLE_IMPORT_RULES = frozenset({"b403"})
 
 _RULE_TEMPLATES: dict[str, str] = {
     rule: EVAL_SUGGESTION for rule in EVAL_RULES
@@ -78,6 +176,30 @@ _RULE_TEMPLATES: dict[str, str] = {
     rule: API_KEY_SUGGESTION for rule in API_KEY_RULES
 } | {
     rule: SUBPROCESS_SUGGESTION for rule in SUBPROCESS_RULES
+} | {
+    rule: PARTIAL_PATH_SUGGESTION for rule in PARTIAL_PATH_RULES
+} | {
+    rule: EXEC_SUGGESTION for rule in EXEC_RULES
+} | {
+    rule: BIND_ALL_SUGGESTION for rule in BIND_ALL_RULES
+} | {
+    rule: PASSWORD_SUGGESTION for rule in PASSWORD_RULES
+} | {
+    rule: EXCEPT_PASS_SUGGESTION for rule in EXCEPT_PASS_RULES
+} | {
+    rule: URLLIB_SUGGESTION for rule in URLLIB_RULES
+} | {
+    rule: RANDOM_SUGGESTION for rule in RANDOM_RULES
+} | {
+    rule: SQL_SUGGESTION for rule in SQL_RULES
+} | {
+    rule: HASH_SUGGESTION for rule in HASH_RULES
+} | {
+    rule: CIPHER_SUGGESTION for rule in CIPHER_RULES
+} | {
+    rule: MARSHAL_SUGGESTION for rule in MARSHAL_RULES
+} | {
+    rule: PICKLE_IMPORT_SUGGESTION for rule in PICKLE_IMPORT_RULES
 }
 
 _CWE_TEMPLATES = {
@@ -86,6 +208,17 @@ _CWE_TEMPLATES = {
     "CWE-79": INNERHTML_SUGGESTION,
     "CWE-798": API_KEY_SUGGESTION,
     "CWE-78": SUBPROCESS_SUGGESTION,
+    "CWE-605": BIND_ALL_SUGGESTION,
+    "CWE-259": PASSWORD_SUGGESTION,
+    "CWE-703": EXCEPT_PASS_SUGGESTION,
+    "CWE-22": URLLIB_SUGGESTION,
+    "CWE-330": RANDOM_SUGGESTION,
+    "CWE-89": SQL_SUGGESTION,
+    "CWE-327": HASH_SUGGESTION,
+    # Shared fallbacks (documented, not collisions): B304/B305/B413 cipher
+    # findings and B302 marshal / B403 pickle-import findings resolve their
+    # OWASP refs through CWE-327 and CWE-502, while their rule keys above
+    # select the more specific text.
 }
 
 

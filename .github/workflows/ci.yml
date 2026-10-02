@@ -1,0 +1,76 @@
+# BravoGuard CI: pytest + ruff + semgrep validate + installer check + Docker Linux proof.
+# Ubuntu-only by design (Windows runners are slower/costlier; Windows paths are
+# covered by the cross-platform installer unit tests with platform mocks).
+# Action pins use major version tags (v4/v5 style) so patches flow automatically.
+# Tool versions follow repo docs: Ruff 0.16.7 (README Stack table), scanner pins
+# via tools-manifest.json through the repo's own installer (dogfooded below).
+# No matrix and no `needs:` between jobs, so every job always runs to completion
+# independently (fail-fast only governs matrices — nothing to cancel here).
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --all-extras
+      - run: uv run pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # Ruff pinned to the README Stack table; isolated via uv tool so the
+      # project venv stays scanner-free (same reason as the local installer).
+      - run: uv tool install "ruff==0.16.7"
+      - run: ruff check src/bravoguard tests scripts
+      # Semgrep isolated too: its mcp==1.29 pin would clash with our mcp>=2.0.0
+      # in-venv, so uv tool (never pip into the project) is the only sane path.
+      - run: uv tool install semgrep
+      - run: semgrep --validate --config rules/
+
+  install-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen --all-extras
+      # Isolated-install locations for the next steps (Go/npm ship on the runner).
+      - run: |
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+      # Dogfood the repo installer: non-strict core plan, executed for real.
+      # Guarddog builds fine on Linux (the Windows nono-py skip never fires here).
+      - run: uv run scripts/install.py --install --yes
+      # Hard gate, no continue-on-error: --check exits 1 on any missing core
+      # tool, and a missing core tool on a fresh runner is a real failure.
+      - run: uv run scripts/install.py --check
+
+  docker-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # Hard gate, not best-effort: the proof image is green locally, so a red
+      # build here is a real regression. ubuntu-latest always ships a daemon,
+      # so no `docker info` gate is needed (a down daemon fails honestly).
+      - run: docker build -f docker/Dockerfile.linux-test -t bravoguard-proof .
+      - run: docker run --rm bravoguard-proof
