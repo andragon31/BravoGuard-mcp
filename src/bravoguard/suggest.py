@@ -120,6 +120,14 @@ MARSHAL_SUGGESTION = (
     "Example: obj = json.loads(data)  # only unmarshal data you produced"
 )
 
+SUPPLY_SUGGESTION = (
+    "Quarantine this package: do not install or import it — install-time "
+    "code runs with your privileges. Remove it from requirements/lockfiles, "
+    "inspect setup.py for hidden payloads, rotate any exposed secrets, and "
+    "report the package to the registry. "
+    "Example: pip uninstall suspect-pkg  # then pin a trusted version"
+)
+
 PICKLE_IMPORT_SUGGESTION = (
     "The pickle import flags deserialization capability (CWE-502): keep it "
     "only if no untrusted input reaches pickle.load/loads — prefer json for "
@@ -165,6 +173,14 @@ HASH_RULES = frozenset({"b303", "b324"})
 CIPHER_RULES = frozenset({"b304", "b305", "b413"})
 MARSHAL_RULES = frozenset({"b302"})
 PICKLE_IMPORT_RULES = frozenset({"b403"})
+SUPPLY_RULES = frozenset(
+    {
+        "bravoguard-supply-install-exec",
+        "bravoguard-supply-exfil",
+        "bravoguard-supply-obfuscated-payload",
+        "bravoguard-supply-remote-download",
+    }
+)
 
 _RULE_TEMPLATES: dict[str, str] = {
     rule: EVAL_SUGGESTION for rule in EVAL_RULES
@@ -200,6 +216,8 @@ _RULE_TEMPLATES: dict[str, str] = {
     rule: MARSHAL_SUGGESTION for rule in MARSHAL_RULES
 } | {
     rule: PICKLE_IMPORT_SUGGESTION for rule in PICKLE_IMPORT_RULES
+} | {
+    rule: SUPPLY_SUGGESTION for rule in SUPPLY_RULES
 }
 
 _CWE_TEMPLATES = {

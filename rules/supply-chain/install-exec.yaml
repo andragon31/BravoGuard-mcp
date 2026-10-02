@@ -1,0 +1,21 @@
+rules:
+  - id: bravoguard-supply-install-exec
+    languages: [python]
+    severity: ERROR
+    message: Avoid shell/subprocess execution in setup.py (CWE-506). Install-time code runs on every install, so a compromised package gets code execution.
+    metadata:
+      cwe: "CWE-506"
+      owasp_2025: A08
+      fix_hint: "Remove subprocess/os.system from setup.py; quarantine the package, pin a trusted version, and report it to the registry."
+    paths:
+      include:
+        - "**/setup.py"
+    patterns:
+      - pattern-either:
+          - pattern: subprocess.run(...)
+          - pattern: subprocess.call(...)
+          - pattern: subprocess.check_output(...)
+          - pattern: subprocess.check_call(...)
+          - pattern: subprocess.Popen(...)
+          - pattern: os.system(...)
+          - pattern: os.popen(...)

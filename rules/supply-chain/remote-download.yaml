@@ -1,0 +1,17 @@
+rules:
+  - id: bravoguard-supply-remote-download
+    languages: [python]
+    severity: ERROR
+    message: Avoid downloading remote code at install time without an integrity check (CWE-494). Fetched artifacts can be swapped for malware.
+    metadata:
+      cwe: "CWE-494"
+      owasp_2025: A08
+      fix_hint: "Remove the install-time download; vendor or pin the artifact with a hash check, quarantine the package, and report it."
+    paths:
+      include:
+        - "**/setup.py"
+    patterns:
+      - pattern-either:
+          - pattern: urllib.request.urlretrieve(...)
+          - pattern: urllib.request.urlopen(...)
+          - pattern: requests.get(...)

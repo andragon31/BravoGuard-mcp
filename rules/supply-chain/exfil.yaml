@@ -1,0 +1,18 @@
+rules:
+  - id: bravoguard-supply-exfil
+    languages: [python]
+    severity: ERROR
+    message: Avoid network transmission primitives in setup.py (CWE-200). Install-time network sends can exfiltrate secrets and environment data.
+    metadata:
+      cwe: "CWE-200"
+      owasp_2025: A01
+      fix_hint: "Remove network calls from setup.py; quarantine the package, inspect it for harvested env/credential reads, rotate exposed secrets, and report it."
+    paths:
+      include:
+        - "**/setup.py"
+    patterns:
+      - pattern-either:
+          - pattern: socket.socket(...)
+          - pattern: socket.create_connection(...)
+          - pattern: requests.post(...)
+          - pattern: smtplib.SMTP(...)

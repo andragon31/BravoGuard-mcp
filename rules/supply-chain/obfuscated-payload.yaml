@@ -1,0 +1,17 @@
+rules:
+  - id: bravoguard-supply-obfuscated-payload
+    languages: [python]
+    severity: ERROR
+    message: Avoid decode-and-execute of base64/hex/marshal blobs (CWE-506). Obfuscated payloads hide malicious code from review.
+    metadata:
+      cwe: "CWE-506"
+      owasp_2025: A08
+      fix_hint: "Remove the encoded blob and exec/eval; quarantine the package and report it — never install code you cannot read."
+    patterns:
+      - pattern-either:
+          - pattern: exec(base64.b64decode(...))
+          - pattern: eval(base64.b64decode(...))
+          - pattern: exec(marshal.loads(...))
+          - pattern: eval(marshal.loads(...))
+          - pattern: exec(bytes.fromhex(...))
+          - pattern: eval(bytes.fromhex(...))

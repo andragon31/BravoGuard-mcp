@@ -6,6 +6,19 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
 ## [Unreleased]
 
 ### Added
+- G1 supply-chain rule pack (`feature/bravoguard-supply-rules`,
+  `rules/supply-chain/*.yaml` + `tests/test_supply_rules.py`): 4 portable
+  semgrep/opengrep rules for install-time/package-context malice (Windows
+  guarddog alternative, no new binaries). `install-exec` (subprocess/shell
+  in setup.py, CWE-506 → A08), `exfil` (socket/requests-post/smtp sends in
+  setup.py, CWE-200 → A01, packaging-scoped so apps never flag),
+  `obfuscated-payload` (base64/hex/marshal decode-and-execute, CWE-506 →
+  A08), `remote-download` (install-time fetch without integrity check,
+  CWE-494 → A08). All ERROR, `pattern`/`pattern-either` only, every CWE
+  verified against the 249-CWE table. Picked up automatically via the
+  existing `--config rules/` dir (no wiring change). One new suggest
+  template (`SUPPLY_SUGGESTION`: quarantine/remove/report) keyed to the 4
+  rule ids — generic + OWASP ref sufficed otherwise.
 - P1 CI (`feature/bravoguard-ci-and-polish`, `.github/workflows/ci.yml`):
   GitHub Actions on push to master + pull_request (ubuntu-latest, per-ref
   cancel-in-progress). Four independent jobs, all hard gates: `test`

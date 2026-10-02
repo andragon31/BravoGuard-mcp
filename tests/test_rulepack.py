@@ -30,7 +30,7 @@ def _load_all_rules() -> list[dict]:
 
 def test_rule_count_and_metadata_convention() -> None:
     rules = _load_all_rules()
-    assert len(rules) == 4  # 2 python + 2 frontend
+    assert len(rules) == 8  # 2 python + 2 frontend + 4 supply-chain
     ids = {rule["id"] for rule in rules}
     assert EXPECTED_FRONTEND_IDS <= ids
     for rule in rules:
