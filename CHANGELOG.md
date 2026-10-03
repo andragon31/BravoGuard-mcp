@@ -187,6 +187,19 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   chains readably (`release: <tool> <version> from https://...`).
 
 ### Fixed
+- D1 secrets path-mode (`feature/bravoguard-secrets-path`,
+  `src/bravoguard/orchestrator.py` + `tests/test_orchestrator.py`):
+  `scan_diff` secrets lane now scans the materialized workdir in path-mode
+  instead of stdin — gitleaks v8 rejects `--source -` (its stdin leg is
+  `--pipe`), so every `scan_diff` reported `errors.betterleaks=failed`.
+  Single path-mode for both engines (files already exist
+  post-materialization: zero extra IO; betterleaks accepts dirs too, so no
+  per-engine branch). Exclude filtering already applied at materialization;
+  empty-materialized returns ok/empty without spawning; timeouts,
+  Secret/Match redaction, and the not-installed taxonomy unchanged. Deleted
+  `betterleaks_stdin_argv` + `_run_betterleaks_stdin`; `_filter_diff` stays
+  (still unit-covered in `tests/test_exclude.py`). Live proof: secret-bearing
+  diff returns the finding with no secrets error key.
 - C1 own-code cache invalidation (`feature/bravoguard-cache-version`,
   `src/bravoguard/cache.py` + `tests/test_cache.py`): `scanner_fingerprint()`
   now appends a `code:<hex12>` segment — sha256 over the bytes of a fixed

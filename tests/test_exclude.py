@@ -276,8 +276,12 @@ def test_scan_diff_excludes_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--exclude=evil.py" in _argv_for(calls, "semgrep")
     bandit_argv = _argv_for(calls, "bandit")
     assert "*/evil.py" in bandit_argv[bandit_argv.index("-x") + 1].split(",")
-    assert stdins and all(b"pickle" not in (data or b"") for data in stdins)
-    assert any(b"x = 1" in (data or b"") for data in stdins)
+    assert stdins and all(data is None for data in stdins)
+    secrets_argv = _argv_for(calls, "betterleaks")
+    source = secrets_argv[secrets_argv.index("--source") + 1]
+    assert source != "-"
+    assert "bravoguard-diff-" in source
+    assert all(Path(part).name != "evil.py" for part in _argv_for(calls, "semgrep"))
 
 
 def test_scan_diff_venv_pattern_reaches_all_engines(monkeypatch: pytest.MonkeyPatch) -> None:

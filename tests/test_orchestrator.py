@@ -280,13 +280,6 @@ def test_scanner_argv_match_manifest_pins() -> None:
         "json",
     ]
     assert pip_audit_argv("req.txt") == ["pip-audit", "-r", "req.txt", "--format=json"]
-    assert orchestrator.betterleaks_stdin_argv() == [
-        "betterleaks",
-        "detect",
-        "--no-git",
-        "--source",
-        "-",
-    ]
     assert orchestrator.betterleaks_path_argv("repo") == [
         "betterleaks",
         "detect",
@@ -430,15 +423,7 @@ def test_secrets_both_absent_records_not_installed(
     assert result["errors"]["betterleaks"] == "not-installed"
 
 
-def test_secrets_argv_flags_identical_for_both_engines() -> None:
-    assert orchestrator.betterleaks_stdin_argv("gitleaks") == [
-        "gitleaks",
-        "detect",
-        "--no-git",
-        "--source",
-        "-",
-    ]
-    assert orchestrator.betterleaks_stdin_argv("gitleaks")[1:] == orchestrator.betterleaks_stdin_argv()[1:]
+def test_secrets_path_argv_flags_identical_for_both_engines() -> None:
     assert orchestrator.betterleaks_path_argv("repo", "gitleaks") == [
         "gitleaks",
         "detect",
@@ -450,6 +435,109 @@ def test_secrets_argv_flags_identical_for_both_engines() -> None:
         orchestrator.betterleaks_path_argv("repo", "gitleaks")[1:]
         == orchestrator.betterleaks_path_argv("repo")[1:]
     )
+
+
+SECRET_DIFF = """\
+diff --git a/app.py b/app.py
+index 1111111..2222222 100644
+--- a/app.py
++++ b/app.py
+@@ -0,0 +1 @@
++api_key = "sk-live-abcdef1234567890"
+"""
+
+
+def _leak_payload() -> bytes:
+    return json.dumps(
+        [
+            {
+                "Description": "Generic API Key",
+                "RuleID": "generic-api-key",
+                "File": "app.py",
+                "StartLine": 1,
+                "Secret": "sk-live-abcdef1234567890",
+                "Match": "api_key = 'sk-live-abcdef1234567890'",
+            }
+        ]
+    ).encode()
+
+
+def test_scan_diff_secrets_path_mode_on_workdir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list = []
+    install_fake(
+        monkeypatch,
+        quiet_responses(betterleaks=(_leak_payload(), 1)),
+        calls,
+    )
+    result = asyncio.run(orchestrator.scan_diff(SECRET_DIFF))
+    assert any(f["rule_id"] == "generic-api-key" for f in result["findings"])
+    assert "sk-live-abcdef1234567890" not in json.dumps(result)
+    argv, kwargs = next(
+        (argv, kwargs) for argv, kwargs in calls if Path(argv[0]).name == "betterleaks"
+    )
+    source = argv[argv.index("--source") + 1]
+    assert source != "-"
+    assert "bravoguard-diff-" in source
+    assert kwargs.get("stdin") == asyncio.subprocess.DEVNULL
+
+
+def test_scan_diff_secrets_gitleaks_fallback_path_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        shutil, "which", lambda name: "/usr/local/bin/gitleaks" if name == "gitleaks" else None
+    )
+    calls: list = []
+
+    async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
+        calls.append((list(argv), dict(kwargs)))
+        name = Path(str(argv[0])).name
+        if name == "betterleaks":
+            raise FileNotFoundError(name)
+        if name == "gitleaks":
+            arglist = list(argv)
+            assert "--report-path" in arglist
+            report = arglist[arglist.index("--report-path") + 1]
+            Path(report).write_bytes(_leak_payload())
+            return FakeProcess(b"INF scanned (stdout carries logs only)", 1)
+        if name in ("semgrep", "bandit"):
+            return FakeProcess(b'{"results": []}', 0)
+        raise FileNotFoundError(name)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    result = asyncio.run(orchestrator.scan_diff(SECRET_DIFF))
+    assert any(f["rule_id"] == "generic-api-key" for f in result["findings"])
+    assert "sk-live-abcdef1234567890" not in json.dumps(result)
+    assert "betterleaks" not in result.get("errors", {})
+    argv, kwargs = next(
+        (argv, kwargs) for argv, kwargs in calls if Path(argv[0]).name == "gitleaks"
+    )
+    source = argv[argv.index("--source") + 1]
+    assert source != "-"
+    assert "bravoguard-diff-" in source
+    assert kwargs.get("stdin") == asyncio.subprocess.DEVNULL
+
+
+def test_scan_diff_all_excluded_skips_secrets_lane(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list = []
+    install_fake(monkeypatch, quiet_responses(), calls)
+    venv_diff = (
+        "diff --git a/.venv/evil.py b/.venv/evil.py\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/.venv/evil.py\n"
+        "+++ b/.venv/evil.py\n"
+        "@@ -0,0 +1 @@\n"
+        "+assert True\n"
+    )
+    result = asyncio.run(orchestrator.scan_diff(venv_diff))
+    assert result["status"] == "ok"
+    assert result["findings"] == []
+    assert "betterleaks" not in {Path(argv[0]).name for argv, _ in calls}
+    assert "betterleaks" not in result.get("errors", {})
 
 
 def _cwd_to(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:

@@ -4,8 +4,9 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
 
 - SAST: ``semgrep --config rules/ --json`` with ``opengrep`` fallback (same args).
 - Python: ``bandit -f json`` over the scan target.
-- Secrets: ``betterleaks detect`` (diff via stdin, repo via path) with a
-  ``gitleaks`` v8 fallback when betterleaks is missing. The fallback adds
+- Secrets: ``betterleaks detect`` over a materialized dir (``scan_diff``
+  scans its workdir, ``scan_repo`` a filtered mirror) with a ``gitleaks``
+  v8 fallback when betterleaks is missing. The fallback adds
   ``--report-path`` capture (this gitleaks build prints only logs to
   stdout); the tmpfile is read once, deleted, and never logged.
 - Frontend: ``oxlint <target> --format json`` (M1).
@@ -51,7 +52,8 @@ Exclude enforcement (``exclude`` param, default :data:`DEFAULT_EXCLUDES`):
 - Secrets (betterleaks/gitleaks): neither engine has a native path-exclude
   flag (verified in ``gitleaks detect --help``; betterleaks was absent so it
   is treated as gitleaks-compatible per tools-manifest.json). ``scan_diff``
-  pre-filters diff chunks by b-side path before stdin; ``scan_repo`` stages
+  relies on materialization-time filtering (excluded files are never
+  written, so the workdir is already clean); ``scan_repo`` stages
   a filtered mirror (rel layout preserved, findings paths remapped back) and
   skips the lane entirely when the mirror is empty.
 - oxlint: native repeatable ``--ignore-pattern=PAT`` flags (verified in
@@ -315,17 +317,6 @@ def resolve_secrets_binary() -> str | None:
     if shutil.which(GITLEAKS_FALLBACK) is not None:
         return GITLEAKS_FALLBACK
     return None
-
-
-def betterleaks_stdin_argv(binary: str = BETTERLEAKS_ENGINE) -> list[str]:
-    """Secrets edge scan reading a diff from stdin.
-
-    Gitleaks v8-style flags (``detect --no-git --source``), identical for
-    both engines; betterleaks is pinned as gitleaks-compatible in
-    tools-manifest.json (fallback gitleaks v8.28). Missing binaries raise
-    ScannerMissingError, never crash.
-    """
-    return [binary, "detect", "--no-git", "--source", "-"]
 
 
 def betterleaks_path_argv(target: str, binary: str = BETTERLEAKS_ENGINE) -> list[str]:
@@ -883,15 +874,6 @@ async def _run_secrets_with_fallback(
     return "betterleaks", payload
 
 
-async def _run_betterleaks_stdin(diff_bytes: bytes, timeout: float) -> tuple[str, Any]:
-    return await _run_secrets_with_fallback(
-        betterleaks_stdin_argv(),
-        betterleaks_stdin_argv(GITLEAKS_FALLBACK),
-        input_data=diff_bytes,
-        timeout=timeout,
-    )
-
-
 async def _run_betterleaks_path(target: str, timeout: float) -> tuple[str, Any]:
     return await _run_secrets_with_fallback(
         betterleaks_path_argv(target),
@@ -1158,8 +1140,8 @@ async def scan_diff(
     normalized findings through. Empty diffs are never cached, and neither
     are fully-degraded results (all scanners not-installed). Files matching
     ``exclude`` (default :data:`DEFAULT_EXCLUDES`) are never materialized,
-    and the secrets lane reads the exclude-filtered diff (skipped entirely
-    when nothing survives the filter). The diff is materialized under
+    and the secrets lane scans the materialized workdir in path-mode
+    (skipped entirely when no files survive the filter). The diff is materialized under
     :func:`materialize_base` (repo-local ``.bravoguard/tmp/`` when writable,
     system temp otherwise); the tree is always removed afterwards, even on
     scanner error or timeout, so finding content never lingers.
@@ -1180,10 +1162,11 @@ async def scan_diff(
     workdir = Path(tempfile.mkdtemp(prefix="bravoguard-diff-", dir=str(materialize_base())))
     try:
         files = materialize_diff_files(diff, workdir, excludes)
-        filtered = _filter_diff(diff, excludes)
+        # Single path-mode for both engines: files already exist, so the
+        # workdir scan adds zero IO; gitleaks v8 rejects `--source -` (stdin FTL).
         secrets_job = (
-            _run_betterleaks_stdin(filtered.encode("utf-8"), budget)
-            if filtered.strip()
+            _run_betterleaks_path(str(workdir), budget)
+            if files
             else _empty_secrets_result()
         )
         # Semgrep skips gitignored dirs (.bravoguard/tmp); explicit files bypass the skip.
