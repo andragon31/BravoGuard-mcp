@@ -128,6 +128,21 @@ SUPPLY_SUGGESTION = (
     "Example: pip uninstall suspect-pkg  # then pin a trusted version"
 )
 
+TYPOSQUAT_SUGGESTION = (
+    "Verify the exact package name on PyPI before installing — typosquats "
+    "run install-time code with your privileges. Delete the suspect entry, "
+    "pin the correct name and version (pip freeze / hash-checking mode), "
+    "and audit recent installs for payloads. "
+    "Example: pip install requests==2.32.3  # exact name, pinned version"
+)
+
+BUNDLED_BINARY_SUGGESTION = (
+    "Review the bundled binary before trusting it: confirm provenance "
+    "against the publisher release (hash/signature), prefer rebuilding "
+    "from source, and keep binaries out of git (release artifacts instead). "
+    "Example: sha256sum tools/app.exe  # compare with the publisher checksum"
+)
+
 PICKLE_IMPORT_SUGGESTION = (
     "The pickle import flags deserialization capability (CWE-502): keep it "
     "only if no untrusted input reaches pickle.load/loads — prefer json for "
@@ -181,6 +196,13 @@ SUPPLY_RULES = frozenset(
         "bravoguard-supply-remote-download",
     }
 )
+# H1 supply-plus rules get their own templates: typosquat needs pinning
+# guidance (quarantine alone does not fix a misspelled dep) and bundled
+# binaries need review-not-guilty guidance (binaries can be legitimate).
+# No CWE fallbacks added: CWE-1357/CWE-506 stay on the generic path for
+# unknown rule ids, so existing fallback behavior is unchanged.
+TYPOSQUAT_RULES = frozenset({"bravoguard-supply-typosquat"})
+BUNDLED_BIN_RULES = frozenset({"bravoguard-supply-bundled-binary"})
 
 _RULE_TEMPLATES: dict[str, str] = {
     rule: EVAL_SUGGESTION for rule in EVAL_RULES
@@ -218,6 +240,10 @@ _RULE_TEMPLATES: dict[str, str] = {
     rule: PICKLE_IMPORT_SUGGESTION for rule in PICKLE_IMPORT_RULES
 } | {
     rule: SUPPLY_SUGGESTION for rule in SUPPLY_RULES
+} | {
+    rule: TYPOSQUAT_SUGGESTION for rule in TYPOSQUAT_RULES
+} | {
+    rule: BUNDLED_BINARY_SUGGESTION for rule in BUNDLED_BIN_RULES
 }
 
 _CWE_TEMPLATES = {

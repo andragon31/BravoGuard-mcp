@@ -8,6 +8,8 @@ Single source for the finding schema and all scanner parsers:
 - Frontend: oxlint ``--format json`` (``diagnostics`` list).
 - Container/IaC: trivy ``fs --format json`` (``Results`` list).
 - IaC: checkov ``-o json`` (``results.failed_checks``).
+- Supply: typosquat + bundled-binary findings pass through
+  (:func:`normalize_supply`) — emitted normalized, never an error.
 
 Schema (``FINDING_KEYS``): ``rule_id, cwe, path, line, severity, message,
 fix_hint, epss, kev, reachability_note``. ``epss`` is a float in [0, 1] or
@@ -352,6 +354,18 @@ def normalize_checkov(payload: Any) -> list[dict[str, Any]]:
                 )
             )
     return findings
+
+
+def normalize_supply(payload: Any) -> list[dict[str, Any]]:
+    """Pass through supply-lane findings (already normalized at creation).
+
+    The typosquat/bundled-binary lane emits schema-conformant findings
+    directly via :func:`make_finding`, so this only drops non-dict items
+    and tolerates non-list payloads (empty, never an error).
+    """
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
 
 
 def _dedup_key(finding: dict[str, Any]) -> tuple[str, str, int, str]:

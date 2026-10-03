@@ -6,6 +6,38 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
 ## [Unreleased]
 
 ### Added
+- H1 supply-plus (`feature/bravoguard-supply-plus`, `src/bravoguard/supply.py` +
+  `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` +
+  `src/bravoguard/suggest.py` + `tests/test_supply_plus.py`): Windows
+  guarddog alternative, in-scan (no new MCP tool, no binaries). `scan_repo`
+  fans out to a pure-Python supply job (bounded walk, never errors, empty
+  -> ok/empty): typosquat parses required deps from `requirements*.txt`
+  (tolerant lines, comments/flags/URLs skipped) + `pyproject.toml`
+  `[project].dependencies` (`optional-dependencies` excluded — extras are
+  opt-in; documented) and flags Damerau-distance-1 against a curated
+  certain-only top-PyPI list (~150 famous projects, short names omitted —
+  `box` vs `tox` collides; transposition included so `reqeusts` fires)
+  as `bravoguard-supply-typosquat` (CWE-1357 -> A03, MEDIUM, pin/exact-name
+  fix hint); bundled executables (`.exe/.dll/.so/.dylib/.bin`) walked with
+  excludes, except bare binary-extension globs (`*.exe` etc.) are lifted
+  for this lane only (they keep engines off binaries; listing binaries is
+  the lane's purpose — dir/filename excludes like `.venv/` still honored),
+  as `bravoguard-supply-bundled-binary` (CWE-506 -> A08, LOW, review-not-
+  guilty wording + rebuild/verify-hash hint). Both CWEs verified via
+  `explain_cwe`. `scan_diff` untouched (diffs lack dependency context;
+  binaries never appear in diffs). Two new suggest templates (pinning for
+  typosquat, provenance-review for binaries — both differ materially from
+  generic; no new CWE fallbacks). Opengrep installs from the official
+  release binary (same asset-matrix pattern as trivy): `RELEASE_REPOS` +
+  `RELEASE_ASSETS` entries (bare unversioned binaries —
+  `opengrep_manylinux_x86` / `opengrep_windows_x86.exe` /
+  `opengrep_osx_arm64`; new bare-binary install branch renames the asset to
+  the engine name), release-first chain (go install proven broken upstream:
+  malformed `;/hello.yml` path, v1.26.0 + v1.30.1-candidate) with go +
+  manual fallback. Manifest stays v1.26.0 — the windows exe ships in the
+  v1.26.0 assets (API-verified). Live proof: opengrep 1.26.0 `--version` +
+  identical rule fire vs semgrep on a seeded fixture; `scan_repo` flags
+  `reqeusts`/`numpi` + bundled `.exe` with the exact refs above.
 - G1 supply-chain rule pack (`feature/bravoguard-supply-rules`,
   `rules/supply-chain/*.yaml` + `tests/test_supply_rules.py`): 4 portable
   semgrep/opengrep rules for install-time/package-context malice (Windows

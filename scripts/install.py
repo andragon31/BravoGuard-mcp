@@ -10,9 +10,9 @@ Rules: user-local only (uv tool / pipx / winget / brew / npm -g / go install),
 never in the project venv; --yes is required for any mutation; guarddog is
 skipped on Windows (known nono-py build failure) unless --force-guarddog.
 Every action prints the tool plus its manifest-pinned version. Never silent.
-Go-unfriendly tools (trivy/trufflehog) prefer official release binaries
-(stdlib download into ~/.local/bin) with go as fallback; syft/grype use
-fixed /cmd go paths with release fallback.
+Go-unfriendly tools (trivy/trufflehog/opengrep) prefer official release
+binaries (stdlib download into ~/.local/bin) with go as fallback;
+syft/grype use fixed /cmd go paths with release fallback.
 """
 
 from __future__ import annotations
@@ -79,6 +79,7 @@ RELEASE_REPOS = {
     "trufflehog": "trufflesecurity/trufflehog",
     "syft": "anchore/syft",
     "grype": "anchore/grype",
+    "opengrep": "opengrep/opengrep",
 }
 
 # {ver} is the plain version without a leading v; the download tag keeps the
@@ -105,6 +106,17 @@ RELEASE_ASSETS = {
         "linux": "grype_{ver}_linux_amd64.tar.gz",
         "windows": "grype_{ver}_windows_amd64.zip",
         "macos": "grype_{ver}_darwin_amd64.tar.gz",
+    },
+    # Opengrep ships bare binaries (no archive, no version in the name —
+    # {ver} formatting is a no-op here). Asset names verified against the
+    # v1.26.0 release listing (windows exe present, so the manifest stays
+    # v1.26.0). macos picks arm64 (current Apple hardware; Intel Macs use
+    # the brew/go fallback); linux picks glibc manylinux (Alpine/musl uses
+    # the fallback).
+    "opengrep": {
+        "linux": "opengrep_manylinux_x86",
+        "windows": "opengrep_windows_x86.exe",
+        "macos": "opengrep_osx_arm64",
     },
 }
 
@@ -205,6 +217,21 @@ def extract_release_binary(archive: Path, dest_dir: Path, tool: str) -> bool:
     return True
 
 
+def _install_bare_binary(tmp: Path, dest_dir: Path, tool: str) -> bool:
+    """Install a release asset that is already a bare binary (opengrep lane).
+
+    The asset filename (``opengrep_manylinux_x86``) is not the engine name,
+    so the bytes are written out as ``tool`` (``.exe`` appended on Windows,
+    ``chmod +x`` on POSIX) via the same sink as archive members.
+    """
+    try:
+        data = tmp.read_bytes()
+    except OSError:
+        return False
+    _write_binary_dest(data, dest_dir, tool)
+    return True
+
+
 def _fetch_asset(url: str, tmp: Path) -> bool:
     req = urllib.request.Request(url, headers={"Accept": "application/octet-stream"})
     try:
@@ -236,7 +263,10 @@ def download_release_binary(repo: str, version: str, asset_matrix: dict[str, str
         dest.mkdir(parents=True, exist_ok=True)
         if not _fetch_asset(url, tmp):
             return False
-        return extract_release_binary(tmp, dest, repo.rpartition("/")[2])
+        tool = repo.rpartition("/")[2]
+        if asset.endswith((".zip", ".tar.gz")):
+            return extract_release_binary(tmp, dest, tool)
+        return _install_bare_binary(tmp, dest, tool)
     except OSError:
         return False
     finally:
@@ -394,9 +424,10 @@ def binary_candidates(name: str, entry: dict, plat: str) -> tuple[list[list[str]
         cmds.append(["go", "install", f"{GO_MODULES[name]}@{go_tag(version)}"])
     if name in RELEASE_ASSETS:
         release = release_candidate(name, version, plat)
-        if name in ("trivy", "trufflehog"):
+        if name in ("trivy", "trufflehog", "opengrep"):
             # go builds are known-broken (trivy toolchain pins, trufflehog
-            # replace directives): try the pinned release binary first.
+            # replace directives, opengrep malformed test path upstream):
+            # try the pinned release binary first.
             cmds.insert(0, release)
         else:
             # syft/grype go builds are proven: the release binary is only a

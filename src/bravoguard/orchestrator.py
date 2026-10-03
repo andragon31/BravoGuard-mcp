@@ -118,8 +118,10 @@ from bravoguard.normalizer import (
     normalize_findings,
     normalize_oxlint,
     normalize_semgrep,
+    normalize_supply,
     normalize_trivy,
 )
+from bravoguard.supply import scan_supply
 
 DIFF_TIMEOUT_SECONDS = 60
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -799,6 +801,15 @@ async def _run_checkov(
     return "checkov", payload
 
 
+async def _run_supply(target: Path, exclude: tuple[str, ...] = ()) -> tuple[str, Any]:
+    """Supply lane: pure-Python typosquat + bundled-binary checks (H1).
+
+    Never raises and never records an error — unreadable trees yield empty
+    findings. Synchronous by design (single bounded walk, no subprocess).
+    """
+    return "supply", scan_supply(target, exclude)
+
+
 def _ignore_scanner_stdout(_text: str) -> dict[str, Any]:
     """Tolerant stdout parse for the gitleaks fallback: stdout carries log
     lines (never findings), so it is discarded — the report file wins."""
@@ -897,6 +908,7 @@ _NORMALIZERS = {
     "oxlint": normalize_oxlint,
     "trivy": normalize_trivy,
     "checkov": normalize_checkov,
+    "supply": normalize_supply,
 }
 
 
@@ -1212,7 +1224,11 @@ async def scan_repo(
     ``--skip-dirs``/``--skip-files``, and checkov via native
     ``--skip-path`` regexes. Lanes with no applicable files (no JS for
     oxlint, no manifests/IaC for trivy/checkov) return ``ok`` with empty
-    findings, not errors.
+    findings, not errors. The supply lane (pure-Python typosquat +
+    bundled-binary checks) runs in-process and never errors; its walk honors
+    ``exclude`` except bare binary-extension globs (``*.exe`` etc.), which
+    are lifted for that lane only — they exist to keep engines off binaries,
+    while listing binaries is the lane's purpose.
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -1249,6 +1265,7 @@ async def scan_repo(
             ("oxlint", _run_oxlint(str(target), budget, excludes)),
             ("trivy", _run_trivy(str(target), budget, excludes)),
             ("checkov", _run_checkov(str(target), budget, excludes)),
+            ("supply", _run_supply(target, excludes)),
         ]
         result = await _collect(jobs)
         if staged:
