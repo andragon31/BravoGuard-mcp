@@ -1,0 +1,30 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:3e671687-395b-41f5-a30f-a58921a69b79",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-01-01T00:00:00Z",
+    "component": {
+      "bom-ref": "test-repo",
+      "name": "test-repo",
+      "type": "application"
+    }
+  },
+  "components": [
+    {
+      "bom-ref": "pkg:npm/lodash@4.17.20",
+      "type": "library",
+      "name": "lodash",
+      "version": "4.17.20",
+      "purl": "pkg:npm/lodash@4.17.20"
+    },
+    {
+      "bom-ref": "pkg:pypi/django@2.2",
+      "type": "library",
+      "name": "django",
+      "version": "2.2",
+      "purl": "pkg:pypi/django@2.2"
+    }
+  ]
+}

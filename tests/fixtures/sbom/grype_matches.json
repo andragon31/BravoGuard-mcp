@@ -1,0 +1,75 @@
+{
+  "matches": [
+    {
+      "vulnerability": {
+        "id": "CVE-2024-1234",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2024-1234",
+        "namespaceName": "github:language:javascript",
+        "severity": "Critical",
+        "description": "Prototype pollution in lodash before 4.17.21.",
+        "fix": {
+          "versions": ["4.17.21"],
+          "state": "fixed"
+        },
+        "epss": 0.82,
+        "kev": true
+      },
+      "relatedVulnerabilities": [],
+      "matchDetails": [
+        {
+          "type": "exact-direct-match",
+          "matcher": "javascript-lang-pkg-cataloger"
+        }
+      ],
+      "artifact": {
+        "name": "lodash",
+        "version": "4.17.20",
+        "type": "javascript",
+        "locations": [
+          {
+            "path": "package-lock.json"
+          }
+        ]
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2019-14234",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2019-14234",
+        "namespaceName": "github:language:python",
+        "severity": "High",
+        "description": "Django: SQL injection possibility in key lookups.",
+        "fix": {
+          "versions": [],
+          "state": "unknown"
+        }
+      },
+      "relatedVulnerabilities": [],
+      "matchDetails": [
+        {
+          "type": "exact-direct-match",
+          "matcher": "python-lang-pkg-cataloger"
+        }
+      ],
+      "artifact": {
+        "name": "django",
+        "version": "2.2",
+        "type": "python",
+        "locations": [
+          {
+            "path": "requirements.txt"
+          }
+        ]
+      }
+    }
+  ],
+  "source": {
+    "type": "sbom",
+    "target": "test-repo.cyclonedx.json"
+  },
+  "descriptor": {
+    "name": "grype",
+    "version": "0.118.0"
+  },
+  "ignoredMatches": []
+}

@@ -12,6 +12,11 @@ Single source for the finding schema and all scanner parsers:
 - IaC: checkov ``-o json`` (``results.failed_checks``).
 - Supply: typosquat + bundled-binary findings pass through
   (:func:`normalize_supply`) — emitted normalized, never an error.
+- SBOM: the syft store lane emits no findings (:func:`normalize_syft`
+  always returns ``[]``; the stored SBOM feeds grype).
+- Supply vulns: grype ``sbom:... -o json`` matches (:func:`normalize_grype`).
+  Severities cap CRITICAL -> HIGH via :func:`_capped_severity` (same policy
+  as trivy: engine-assigned without exploit context).
 
 Schema (``FINDING_KEYS``): ``rule_id, cwe, path, line, severity, message,
 fix_hint, epss, kev, reachability_note``. ``epss`` is a float in [0, 1] or
@@ -31,6 +36,12 @@ Helpers:
 
 - :func:`dedup_findings` drops repeats keyed on
   ``rule_id + path + line + sha256(message)`` (first occurrence wins).
+- :func:`dedup_cve_findings` is the secondary pass: trivy + grype report
+  the same CVE on the same path, so one finding per ``(cve, path)`` is
+  kept, preferring the richer fix info (longest non-empty ``fix_hint``;
+  first occurrence wins exact ties). Only ``trivy-``/``grype-`` rule ids
+  carrying a ``CVE-YYYY-NNNN`` id participate; everything else passes
+  through untouched, so the primary dedup is never weakened.
 - :func:`sort_findings` orders KEV-listed findings first, then EPSS
   descending (unknown EPSS sorts last).
 """
@@ -39,6 +50,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from typing import Any
 
 FINDING_KEYS = (
@@ -444,6 +456,88 @@ def normalize_checkov(payload: Any) -> list[dict[str, Any]]:
     return findings
 
 
+def normalize_syft(payload: Any) -> list[dict[str, Any]]:
+    """SBOM store lane: the SBOM is inventory for grype, never findings."""
+    return []
+
+
+def _grype_location(artifact: dict[str, Any]) -> Any:
+    """First artifact location path of a grype match, else empty.
+
+    Grype matches SBOM inventory, so locations mirror the SBOM's recorded
+    paths (e.g. ``package-lock.json``); image-derived SBOMs may carry none.
+    """
+    locations = artifact.get("locations")
+    if isinstance(locations, list) and locations:
+        first = locations[0]
+        if isinstance(first, dict):
+            return first.get("path")
+    return ""
+
+
+def _grype_epss(vulnerability: dict[str, Any], match: dict[str, Any]) -> Any:
+    """Best-effort EPSS read: vulnerability keys first, then match level."""
+    for source in (vulnerability, match):
+        for key in ("epss", "epssScore", "epss_score"):
+            value = source.get(key)
+            if value is not None:
+                return value
+    return None
+
+
+def _grype_kev(vulnerability: dict[str, Any], match: dict[str, Any]) -> Any:
+    """Best-effort KEV read: vulnerability keys first, then match level."""
+    for source in (vulnerability, match):
+        for key in ("kev", "knownExploited", "cisaKev", "isKev"):
+            if source.get(key) is not None:
+                return source.get(key)
+    return False
+
+
+def normalize_grype(payload: Any) -> list[dict[str, Any]]:
+    """Map grype ``sbom:... -o json`` matches to the unified shape.
+
+    Recorded shape (grype 0.118.0, documented source — binary absent in
+    this env): ``{"matches": [{"vulnerability": {id, severity,
+    description, fix: {versions[]}}, "artifact": {name, version,
+    locations: [{path}]}}]}``. Rules are ``grype-<vuln-id>``; the fix hint
+    mirrors the trivy format (``Upgrade <pkg> <installed> to <fixed>.``)
+    from the first fixed version; ``cwe`` stays empty (matches carry no
+    CWE); EPSS/KEV pass through when present (grype OSS omits them, so
+    blanks degrade to unknown, never fabricated).
+    """
+    matches = payload.get("matches", []) if isinstance(payload, dict) else []
+    findings = []
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        vulnerability = match.get("vulnerability")
+        vulnerability = vulnerability if isinstance(vulnerability, dict) else {}
+        artifact = match.get("artifact")
+        artifact = artifact if isinstance(artifact, dict) else {}
+        fix = vulnerability.get("fix")
+        fix = fix if isinstance(fix, dict) else {}
+        versions = fix.get("versions") or []
+        fixed = versions[0] if isinstance(versions, list) and versions else ""
+        package = artifact.get("name", "")
+        installed = artifact.get("version", "")
+        hint = f"Upgrade {package} {installed} to {fixed}." if fixed else ""
+        findings.append(
+            make_finding(
+                f"grype-{vulnerability.get('id', 'unknown')}",
+                "",
+                _grype_location(artifact),
+                0,
+                _capped_severity(vulnerability.get("Severity", vulnerability.get("severity"))),
+                vulnerability.get("description") or vulnerability.get("summary"),
+                hint,
+                _grype_epss(vulnerability, match),
+                _grype_kev(vulnerability, match),
+            )
+        )
+    return findings
+
+
 def normalize_supply(payload: Any) -> list[dict[str, Any]]:
     """Pass through supply-lane findings (already normalized at creation).
 
@@ -454,6 +548,61 @@ def normalize_supply(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, list):
         return []
     return [item for item in payload if isinstance(item, dict)]
+
+
+_CVE_RE = re.compile(r"CVE-\d{4}-\d+", re.IGNORECASE)
+_CVE_LANE_PREFIXES = ("trivy-", "grype-")
+
+
+def _cve_dedup_key(finding: dict[str, Any]) -> tuple[str, str] | None:
+    """``(cve, path)`` for trivy/grype CVE findings, else None (pass-through)."""
+    rule_id = str(finding.get("rule_id", ""))
+    if not rule_id.startswith(_CVE_LANE_PREFIXES):
+        return None
+    match = _CVE_RE.search(rule_id)
+    if match is None:
+        return None
+    return (match.group(0).upper(), str(finding.get("path", "")))
+
+
+def _fix_richness(finding: dict[str, Any]) -> tuple[int, int]:
+    """Tie-break rank: a non-empty fix hint beats an empty one, longer wins."""
+    hint = str(finding.get("fix_hint", ""))
+    return (1 if hint else 0, len(hint))
+
+
+def dedup_cve_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Secondary pass: keep ONE finding per ``(cve, path)``.
+
+    Trivy and grype match the same inventory, so the same CVE on the same
+    path arrives twice with different rule ids (``trivy-CVE-…`` vs
+    ``grype-CVE-…``) — the primary ``rule_id``-keyed dedup cannot see the
+    pair. The winner is the richer fix info (highest :func:`_fix_richness`);
+    exact ties keep the first occurrence (stable, engine-agnostic). Findings
+    without a trivy/grype CVE rule id pass through in order.
+    """
+    winners: dict[tuple[str, str], dict[str, Any]] = {}
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        key = _cve_dedup_key(finding)
+        if key is None:
+            continue
+        current = winners.get(key)
+        if current is None or _fix_richness(finding) > _fix_richness(current):
+            winners[key] = finding
+    emitted: set[tuple[str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        key = _cve_dedup_key(finding)
+        if key is None:
+            unique.append(finding)
+        elif key not in emitted:
+            emitted.add(key)
+            unique.append(winners[key])
+    return unique
 
 
 def _dedup_key(finding: dict[str, Any]) -> tuple[str, str, int, str]:
@@ -494,5 +643,5 @@ def sort_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def normalize_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Dedup then risk-sort a mixed-scanner finding list."""
-    return sort_findings(dedup_findings(findings))
+    """Dedup (primary, then CVE secondary) then risk-sort a mixed-scanner list."""
+    return sort_findings(dedup_cve_findings(dedup_findings(findings)))

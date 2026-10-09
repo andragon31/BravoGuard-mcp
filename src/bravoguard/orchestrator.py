@@ -20,6 +20,12 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
   (M1 + T2 license; the ``secret`` scanner stays excluded on purpose — betterleaks owns
   secrets, so enabling it would duplicate findings and double-handle live
   secrets).
+- SBOM store (T4): ``syft <target> -o cyclonedx-json`` written once under
+  the cache dir (``sbom/<dir-fingerprint>.cyclonedx.json``) and reused
+  while the fingerprint is unchanged (generate-once/rescan-many).
+- Supply vulns second opinion (T4): ``grype sbom:<store> -o json`` over the
+  stored SBOM (local-DB matching, no network calls, so no opt-in flag —
+  unlike the trufflehog verify lane).
 - IaC: ``uv tool run --from checkov checkov -d <target> -o json`` (M1; the
   bare ``checkov`` shim is broken on Windows, ``uv tool run`` is proven).
 
@@ -27,6 +33,8 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
 Python snippets, while oxlint needs JS/TS files, trivy needs manifests /
 lockfiles / IaC, and checkov needs IaC files — repo-scale lanes with no
 diff signal, so wiring them there adds subprocess cost for zero findings.
+Syft/grype stay out for the same reason (an SBOM needs a tree; diffs lack
+context — same rationale as supply).
 
 Security properties:
 
@@ -117,7 +125,13 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from bravoguard.cache import FindingCache, make_osv_key, make_scan_key, scanner_fingerprint
+from bravoguard.cache import (
+    FindingCache,
+    make_osv_key,
+    make_scan_key,
+    resolve_sbom_path,
+    scanner_fingerprint,
+)
 from bravoguard.languages import JS_SUFFIXES, PYTHON_SUFFIXES, detect_languages, lanes_for
 from bravoguard.normalizer import (
     FINDING_KEYS,
@@ -125,9 +139,11 @@ from bravoguard.normalizer import (
     normalize_betterleaks,
     normalize_checkov,
     normalize_findings,
+    normalize_grype,
     normalize_oxlint,
     normalize_semgrep,
     normalize_supply,
+    normalize_syft,
     normalize_trivy,
     normalize_trufflehog,
 )
@@ -144,6 +160,14 @@ OXLINT_ENGINE = "oxlint"
 TRIVY_ENGINE = "trivy"
 CHECKOV_ENGINE = "checkov"
 TRUFFLEHOG_ENGINE = "trufflehog"
+SYFT_ENGINE = "syft"
+GRYPE_ENGINE = "grype"
+
+# T4 skip reasons for the SBOM + second-opinion lanes (surfaced as skipped+reason).
+SYFT_MISSING_REASON = "syft not installed: SBOM store skipped"
+GRYPE_MISSING_REASON = "grype not installed: SBOM matcher skipped"
+GRYPE_NO_SBOM_REASON = "syft SBOM unavailable: no SBOM to match"
+SYFT_IDLE_REASON = "grype not installed: SBOM store unused without matcher"
 
 # Opt-in reason for the trufflehog verify lane (surfaced as skipped+reason).
 TRUFFLEHOG_OPT_IN_REASON = "trufflehog verify is opt-in: pass verify_secrets=True"
@@ -196,9 +220,11 @@ __all__ = [
     "DIFF_TIMEOUT_SECONDS",
     "FINDING_KEYS",
     "GITLEAKS_FALLBACK",
+    "GRYPE_ENGINE",
     "OPENGREP_FALLBACK",
     "OXLINT_ENGINE",
     "SEMGREP_ENGINE",
+    "SYFT_ENGINE",
     "TRIVY_ENGINE",
     "TRUFFLEHOG_ENGINE",
     "materialize_base",
@@ -206,8 +232,11 @@ __all__ = [
     "normalize_betterleaks",
     "normalize_checkov",
     "normalize_findings",
+    "normalize_grype",
     "normalize_oxlint",
     "normalize_semgrep",
+    "normalize_supply",
+    "normalize_syft",
     "normalize_trivy",
     "normalize_trufflehog",
     "resolve_secrets_binary",
@@ -899,6 +928,73 @@ async def _run_checkov(
     return "checkov", payload
 
 
+def syft_argv(target: str) -> list[str]:
+    """SBOM inventory of a directory target as CycloneDX JSON on stdout.
+
+    Documented-source flags: syft 1.51.1 is absent in this env, so re-verify
+    read-only via ``syft --help`` when present before changing them —
+    ``syft <dir> -o cyclonedx-json`` per anchore/syft docs. Stdout is
+    captured and written to the store by :func:`_run_syft` (no ``-o file=``
+    form, so the spawn stays inside :func:`run_scanner_json`).
+    """
+    return [SYFT_ENGINE, target, "-o", "cyclonedx-json"]
+
+
+def grype_argv(sbom_path: str) -> list[str]:
+    """Second-opinion match of a stored SBOM as JSON on stdout.
+
+    Documented-source flags: grype 0.118.0 is absent in this env, so
+    re-verify read-only via ``grype --help`` when present before changing
+    them — ``grype sbom:<path> -o json`` per anchore/grype docs. Matching
+    is local-DB (no network verification calls, unlike trufflehog), so the
+    lane needs no opt-in flag.
+    """
+    return [GRYPE_ENGINE, f"sbom:{sbom_path}", "-o", "json"]
+
+
+def sbom_store_path(target: str | Path) -> Path:
+    """Store file for a scan target: ``<cache-dir>/sbom/<fingerprint>.cyclonedx.json``.
+
+    Keyed on :func:`_dir_fingerprint` with default excludes (the SBOM is a
+    content inventory; per-scan excludes shape findings, not the store).
+    :func:`_run_syft` and the ``scan_repo`` grype phase both route through
+    here, so the write path and the match path can never diverge.
+    """
+    return resolve_sbom_path(_dir_fingerprint(Path(target)))
+
+
+async def _run_syft(target: str, timeout: float) -> tuple[str, Any]:
+    """SBOM store lane: generate-once/rescan-many keyed on the dir fingerprint.
+
+    Fingerprint hit (store file exists) reuses it with no spawn; miss runs
+    syft once and writes its CycloneDX stdout to the store. The lane emits
+    no findings itself (:func:`normalize_syft` is ``[]``) — the SBOM feeds
+    :func:`_run_grype`. Missing binary / timeout / bad JSON propagate to
+    the caller (``scan_repo`` pre-checks both binaries and reports
+    skipped+reason instead; a spawn race still degrades honestly via
+    ``_collect`` errors). ``scan_diff`` never calls this (SBOM needs a
+    tree; diffs lack context).
+    """
+    store = sbom_store_path(target)
+    if store.is_file():
+        return "syft", {"sbom_path": str(store)}
+    payload = await run_scanner_json(
+        syft_argv(target), input_data=None, timeout=timeout
+    )
+    with contextlib.suppress(OSError):
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_text(json.dumps(payload), encoding="utf-8")
+    return "syft", {"sbom_path": str(store)}
+
+
+async def _run_grype(sbom_path: str, timeout: float) -> tuple[str, Any]:
+    """Second-opinion matcher over a stored SBOM (local DB, no network)."""
+    payload = await run_scanner_json(
+        grype_argv(sbom_path), input_data=None, timeout=timeout
+    )
+    return "grype", payload
+
+
 async def _run_supply(target: Path, exclude: tuple[str, ...] = ()) -> tuple[str, Any]:
     """Supply lane: pure-Python typosquat + bundled-binary checks (H1).
 
@@ -1032,11 +1128,13 @@ async def _run_trufflehog(target: str, timeout: float) -> tuple[str, Any]:
 # scan_repo lanes gated by detect_languages (T1). Secrets, trivy, and
 # checkov are language-agnostic and always run; future manifest-gated
 # lanes (deptry, knip, npm audit, ...) join via LANE_GATES (T2+).
+# T4: syft/grype join via LANE_GATES with every-stack gates (any non-empty
+# detection runs them; only an empty detection skips) — see languages.py.
 # The trufflehog verify lane intentionally bypasses LANE_GATES: secrets are
 # language-agnostic (no suffix gate applies) and the lane is opt-in network
 # verification, so it is wired separately via verify_secrets (never silent:
 # opted-out runs report skipped + TRUFFLEHOG_OPT_IN_REASON).
-_REPO_GATED_LANES: tuple[str, ...] = ("sast", "bandit", "oxlint", "supply")
+_REPO_GATED_LANES: tuple[str, ...] = ("sast", "bandit", "oxlint", "supply", "syft", "grype")
 
 
 _NORMALIZERS = {
@@ -1047,6 +1145,7 @@ _NORMALIZERS = {
     "trivy": normalize_trivy,
     "checkov": normalize_checkov,
     "supply": normalize_supply,
+    "syft": normalize_syft,
     "trufflehog": normalize_trufflehog,
 }
 
@@ -1416,7 +1515,15 @@ async def scan_repo(
     reason (never silent); opted-in runs scan the raw target with the full
     lane budget (verification does network calls) and map verified live
     credentials to CRITICAL findings. ``scan_diff`` is untouched by this
-    flag and stays offline/fast.
+    flag and stays offline/fast. The syft SBOM store + grype second-opinion
+    lanes run automatically when BOTH binaries are present (grype matching
+    is local-DB, so no opt-in flag is needed — deliberate contrast with the
+    network-calling trufflehog lane, hence no ``server.scan_repo`` flag);
+    when either binary is missing both lanes report ``skipped`` + reason
+    (never an error). Grype matches the stored SBOM in a second phase after
+    the fan-out (it needs the syft store path), and its findings merge with
+    a final :func:`normalize_findings` pass so the CVE secondary dedup
+    sees trivy + grype together.
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -1447,6 +1554,16 @@ async def scan_repo(
     }
     if not verify_secrets:
         skipped["trufflehog"] = TRUFFLEHOG_OPT_IN_REASON
+    # T4: the SBOM store is only useful with its matcher and vice versa, so
+    # both lanes run only when BOTH binaries are present; either missing
+    # skips both with a machine-readable reason (never an error).
+    if "syft" not in skipped and "grype" not in skipped:
+        if shutil.which(SYFT_ENGINE) is None:
+            skipped["syft"] = SYFT_MISSING_REASON
+            skipped["grype"] = GRYPE_NO_SBOM_REASON
+        elif shutil.which(GRYPE_ENGINE) is None:
+            skipped["syft"] = SYFT_IDLE_REASON
+            skipped["grype"] = GRYPE_MISSING_REASON
     with tempfile.TemporaryDirectory(prefix="bravoguard-secrets-") as stage_tmp:
         staging = Path(stage_tmp)
         staged = _stage_filtered_tree(target, excludes, staging)
@@ -1467,9 +1584,31 @@ async def scan_repo(
             jobs.append(("oxlint", _run_oxlint(str(target), budget, excludes)))
         jobs.append(("trivy", _run_trivy(str(target), budget, excludes)))
         jobs.append(("checkov", _run_checkov(str(target), budget, excludes)))
+        if "syft" not in skipped:
+            jobs.append(("syft", _run_syft(str(target), budget)))
         if "supply" not in skipped:
             jobs.append(("supply", _run_supply(target, excludes)))
         result = await _collect(jobs)
+        # T4 second phase: grype matches the stored SBOM (sequential — it
+        # needs the syft store path, so it cannot join the fan-out). Its
+        # findings re-enter normalize_findings with the batch so the CVE
+        # secondary dedup sees trivy + grype together.
+        if "grype" not in skipped:
+            store = sbom_store_path(target)
+            if store.is_file():
+                try:
+                    _, grype_payload = await _run_grype(str(store), budget)
+                except ScannerMissingError:
+                    result.setdefault("errors", {})["grype"] = "not-installed"
+                except ScannerTimeoutError:
+                    result.setdefault("errors", {})["grype"] = "timeout"
+                except OrchestratorError:
+                    result.setdefault("errors", {})["grype"] = "failed"
+                else:
+                    combined = result["findings"] + normalize_grype(grype_payload)
+                    result["findings"] = normalize_findings(combined)
+            else:
+                skipped["grype"] = GRYPE_NO_SBOM_REASON
         if staged:
             for finding in result.get("findings", []):
                 if isinstance(finding, dict) and finding.get("path"):

@@ -67,11 +67,17 @@ LANGUAGE_ORDER: tuple[str, ...] = ("python", "javascript", "containers")
 
 # Per-lane gating: "suffix" lanes need a detected language, "manifest"
 # lanes need a manifest group present. T2+ lanes register here.
+# T4 choice (documented): syft/grype match the whole target dir regardless
+# of language (lockfile-driven vuln matching across ecosystems), so their
+# gate lists every detected stack — they run on any non-empty detection
+# and skip only when detection found nothing.
 LANE_GATES: dict[str, dict[str, Any]] = {
     "sast": {"kind": "suffix", "languages": ("python", "javascript")},
     "bandit": {"kind": "suffix", "languages": ("python",)},
     "oxlint": {"kind": "suffix", "languages": ("javascript",)},
     "supply": {"kind": "manifest", "manifests": ("python",)},
+    "syft": {"kind": "suffix", "languages": ("python", "javascript", "containers")},
+    "grype": {"kind": "suffix", "languages": ("python", "javascript", "containers")},
 }
 
 # Machine-readable skip reasons, one per gated lane (T2+ adds its own).
@@ -80,6 +86,8 @@ SKIP_REASONS: dict[str, str] = {
     "bandit": "no python files or markers detected",
     "oxlint": "no javascript files or markers detected",
     "supply": "no python manifests detected",
+    "syft": "no python, javascript, or container signals detected",
+    "grype": "no python, javascript, or container signals detected",
 }
 
 

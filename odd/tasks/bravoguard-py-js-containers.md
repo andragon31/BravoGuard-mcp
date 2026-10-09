@@ -38,7 +38,7 @@ Review: native review per work-unit candidate per user-owned RDD switch (inspect
 - [x] T0 (parent inline): tracking setup — feature doc + Engram mirror (id 227) + visible todos + branch `feature/bravoguard-py-js-containers`. DONE.
 - [x] T1 (Fase 0.1): detect_languages + routing + skipped+reason contract. DONE commit `45c6c0c` (21 files, +1024/-24). Suite 296 passed + 10 skipped, ruff clean. Native review lineage `review-e631ae04200f1822`: approved + acknowledged (authority burned). 3 non-blocking advisories filed as later work: R3-bounded-census (languages.py:80), R3-exclude-routing (orchestrator.py:1304), R3-stat-robustness (languages.py:90). Surfaces were: src/bravoguard/languages.py (new), src/bravoguard/orchestrator.py, tests/test_languages.py (new) + fixtures.
 - [ ] T2 (Fase 0.2): free config — .oxlintrc.json (suspicious warn), trivy +license, semgrep python/frontend split by suffix. Surfaces: .oxlintrc.json (new), src/bravoguard/orchestrator.py, tests/test_lanes.py.
-- [ ] T3 (Fase 1.1): TruffleHog verify lane (opt-in) + normalize_trufflehog. Surfaces: src/bravoguard/orchestrator.py, src/bravoguard/normalizer.py, src/bravoguard/server.py, tests/test_secrets.py (new) + fixtures.
+- [x] T3 (Fase 1.1): TruffleHog verify lane (opt-in) + normalize_trufflehog. DONE commit `76e6530`. Suite 322 passed + 10 skipped, ruff clean. Native review lineage `review-317951556f419b19`: approved + acknowledged. 2 non-blocking advisories: R3-001 (orchestrator.py:1), R3-002 (test_secrets.py:1). T3 conflict note: worker stopped on 4 frozen T1 asserts (opt-out skipped entry); parent updated them inline (same precedent as T1/T2). Capture lesson: hand-transcribed bindings corrupt long hashes — use machine-to-machine passing via codemode (top-level `collectBindings`, NOT under `result`) for all future captures.
 - [ ] T4 (Fase 1.2): Syft SBOM store + Grype lane + CVE secondary dedup. Surfaces: orchestrator.py, normalizer.py, cache.py, tests + fixtures.
 - [ ] T5 (Fase 1.3): GuardDog Linux lane (win32 skip with reason). Surfaces: orchestrator.py, normalizer.py, cli.py, tests.
 - [ ] T6 (Fase 2): Python lanes — ruff (no-S), vulture, deptry (manifest-gated), SBOM feed to grype. Surfaces: orchestrator.py, normalizer.py, tests + fixtures.
@@ -49,7 +49,7 @@ Review: native review per work-unit candidate per user-owned RDD switch (inspect
 
 ## Progress
 - Branch `feature/bravoguard-py-js-containers` from master `21051ce`. Base: 269 passed, 10 skipped.
-- T0 done. T1 done (commit 45c6c0c, review approved+acknowledged). T2 done (commit a703525, review approved+acknowledged lineage review-5272061c1aa97ebf; 2 non-blocking advisories R3-001 languages.py:80, R3-002 orchestrator.py:146; first capture refused at admission for foreign paths, admitted on relaunch). T3 delegated.
+- T0 done. T1 done (45c6c0c, review ok). T2 done (a703525, review ok). T3 done (76e6530, review ok lineage review-317951556f419b19). T4 delegated.
 
 ## Verification evidence
 - Per task `<command>: <observed result>`; parent spot-checks one check per delegated task.

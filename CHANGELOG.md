@@ -26,6 +26,12 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   untouched, edge stays offline); verified live credentials -> CRITICAL (CWE-798), unverified ->
   HIGH; Raw/RawV2 secret material never enters findings. No installer change (pinned v3.95.x).
   10 new tests.
+- T4 syft SBOM store + grype lane (`feature/bravoguard-py-js-containers`, `src/bravoguard/cache.py` +
+  `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` + `src/bravoguard/languages.py` +
+  `tests/test_sbom.py` + `tests/fixtures/sbom/`): CycloneDX SBOM stored once per dir fingerprint
+  (generate-once/rescan-many); grype matches local-DB automatically when both binaries are present
+  (no opt-in flag, unlike verify lanes); CVE secondary dedup keeps one finding per (CVE, path)
+  with richer fix info winning. No installer change (pinned syft 1.51.1 + grype 0.118.0). 26 new tests.
 - H1 supply-plus (`feature/bravoguard-supply-plus`, `src/bravoguard/supply.py` +
   `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` +
   `src/bravoguard/suggest.py` + `tests/test_supply_plus.py`): Windows

@@ -34,6 +34,8 @@ CACHE_ENV_VAR = "BRAVO_CACHE_PATH"
 IN_MEMORY_PATH = ":memory:"
 DEFAULT_CACHE_DIRNAME = ".bravoguard"
 DEFAULT_CACHE_FILENAME = "cache.db"
+DEFAULT_SBOM_DIRNAME = "sbom"
+SBOM_FILENAME_SUFFIX = ".cyclonedx.json"
 
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS cache_entries ("
@@ -55,7 +57,9 @@ __all__ = [
     "make_scan_key",
     "put",
     "reset_default_cache",
+    "resolve_cache_dir",
     "resolve_cache_path",
+    "resolve_sbom_path",
     "rules_fingerprint",
     "scanner_fingerprint",
 ]
@@ -193,6 +197,29 @@ def resolve_cache_path(explicit: str | Path | None = None) -> str | Path:
     if env:
         return env
     return Path.cwd() / DEFAULT_CACHE_DIRNAME / DEFAULT_CACHE_FILENAME
+
+
+def resolve_cache_dir(explicit: str | Path | None = None) -> Path:
+    """Directory holding the SQLite cache (parent of :func:`resolve_cache_path`).
+
+    The SBOM store lives adjacent to the database under this dir. ``:memory:``
+    has no filesystem home, so it falls back to a system-temp dir (SBOM
+    documents must be real files for grype to match them).
+    """
+    path = resolve_cache_path(explicit)
+    if str(path) == IN_MEMORY_PATH:
+        return Path(tempfile.gettempdir()) / "bravoguard-sbom"
+    return Path(str(path)).parent
+
+
+def resolve_sbom_path(fingerprint: str, explicit: str | Path | None = None) -> Path:
+    """Store path for one directory fingerprint: ``<cache-dir>/sbom/<fp>.cyclonedx.json``.
+
+    The fingerprint segment is sanitized to alphanumerics plus ``-``/``_`` so
+    a caller-supplied string can never escape the store dir.
+    """
+    safe = "".join(c for c in str(fingerprint) if c.isalnum() or c in ("-", "_"))
+    return resolve_cache_dir(explicit) / DEFAULT_SBOM_DIRNAME / f"{safe or 'unknown'}{SBOM_FILENAME_SUFFIX}"
 
 
 class FindingCache:
