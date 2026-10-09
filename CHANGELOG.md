@@ -39,6 +39,13 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   MEDIUM default (HIGH on stated high confidence), CWE-1357/506/200 for known-malice detectors.
   Complements (never duplicates) the own typosquat lane. No installer change (already covered).
   19 new tests.
+- T6 python depth lanes (`feature/bravoguard-py-js-containers`, `src/bravoguard/orchestrator.py` +
+  `src/bravoguard/normalizer.py` + `src/bravoguard/languages.py` + `src/bravoguard/cli.py` +
+  `scripts/install.py` + `scripts/install_external.py` + `tests/test_python_lanes.py` +
+  `tests/fixtures/python-lanes/`): ruff no-S (E/F/W/I/N/UP/B/A/C4/SIM, LOW-only, diff+repo),
+  vulture dead-code (confidence floor, tolerant line parser), deptry hygiene (manifest-gated,
+  tmpfile JSON). deptry+vulture added to PYTHON_TOOLS installs. Shared old fakes force the three
+  missing so skips are hermetic on every machine. 31 new tests.
 - H1 supply-plus (`feature/bravoguard-supply-plus`, `src/bravoguard/supply.py` +
   `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` +
   `src/bravoguard/suggest.py` + `tests/test_supply_plus.py`): Windows

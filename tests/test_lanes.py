@@ -8,6 +8,7 @@ same real shape to pin the error->MEDIUM mapping.
 
 import asyncio
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -143,6 +144,20 @@ class FakeProcess:
         return self.returncode
 
 
+def _force_py_lanes_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetic T6: ruff ships on some dev machines — force the new lanes
+    missing so skips (never errors) are deterministic everywhere."""
+    real_which = shutil.which
+    _missing = {"ruff", "vulture", "deptry"}
+
+    def _which(name: str) -> str | None:
+        if Path(str(name)).name in _missing:
+            return None
+        return real_which(name)
+
+    monkeypatch.setattr(shutil, "which", _which)
+
+
 def install_lane_fake(monkeypatch: pytest.MonkeyPatch, calls: list, missing: set = frozenset()) -> None:
     """Fake dispatcher: quiet legacy lanes + real-shape M1 payloads.
 
@@ -150,6 +165,7 @@ def install_lane_fake(monkeypatch: pytest.MonkeyPatch, calls: list, missing: set
     checkov always as ``uv tool run ...``); names in ``missing`` raise
     FileNotFoundError to emulate absent binaries.
     """
+    _force_py_lanes_missing(monkeypatch)
 
     async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
         calls.append(list(argv))
@@ -330,6 +346,7 @@ def test_scan_repo_new_lanes_empty_when_not_applicable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    _force_py_lanes_missing(monkeypatch)
 
     async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
         names = {Path(str(a)).name for a in argv} | set(argv)
@@ -352,6 +369,11 @@ def test_scan_repo_new_lanes_empty_when_not_applicable(
     # T1 routing: py-only dir skips oxlint (no JS) and supply (no manifests).
     assert result["skipped"]["oxlint"] == "no javascript files or markers detected"
     assert result["skipped"]["supply"] == "no python manifests detected"
+    # T6: ruff/vulture forced missing (hermetic everywhere); deptry gate-skips
+    # (bare tmp has no manifests, so the manifest gate fires before any which).
+    assert result["skipped"]["ruff"] == "ruff not installed: python lint lane skipped"
+    assert result["skipped"]["vulture"] == "vulture not installed: dead-code lane skipped"
+    assert result["skipped"]["deptry"] == "no python manifests detected"
 
 
 def test_scan_repo_new_lanes_missing_degrades_to_not_installed(

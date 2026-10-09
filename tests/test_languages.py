@@ -10,6 +10,7 @@ suites that let it run for real).
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,20 @@ class FakeProcess:
         return self.returncode
 
 
+def _force_py_lanes_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetic T6: ruff ships on some dev machines — force the new lanes
+    missing so skips (never errors) are deterministic everywhere."""
+    real_which = shutil.which
+    _missing = {"ruff", "vulture", "deptry"}
+
+    def _which(name: str) -> str | None:
+        if Path(str(name)).name in _missing:
+            return None
+        return real_which(name)
+
+    monkeypatch.setattr(shutil, "which", _which)
+
+
 def install_t1_fake(
     monkeypatch: pytest.MonkeyPatch,
     calls: list,
@@ -86,6 +101,7 @@ def install_t1_fake(
     Routes on argv content (win32 oxlint arrives as ``cmd /c oxlint``,
     checkov always as ``uv tool run ...``); mirrors test_lanes.py.
     """
+    _force_py_lanes_missing(monkeypatch)
 
     async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
         calls.append(list(argv))
@@ -434,9 +450,13 @@ def test_lanes_for_js_only_skips_python_lanes(tmp_path: Path) -> None:
     (tmp_path / "app.js").write_text("let x = 1;\n", encoding="utf-8")
     skips = lanes_for(detect_languages(tmp_path))
     # sast covers both languages so it still runs on JS; supply needs py manifests.
+    # T6: ruff/vulture suffix-gated + deptry manifest-gated on python.
     assert skips == {
         "bandit": "no python files or markers detected",
         "supply": "no python manifests detected",
+        "ruff": "no python files or markers detected",
+        "vulture": "no python files or markers detected",
+        "deptry": "no python manifests detected",
     }
 
 
@@ -444,7 +464,8 @@ def test_lanes_for_empty_dir_skips_all_gated(tmp_path: Path) -> None:
     skips = lanes_for(detect_languages(tmp_path))
     # T4: syft/grype gated on any-stack signals; empty dir skips them too.
     # T5: guarddog manifest-gated; empty dir skips it too.
-    assert set(skips) == {"sast", "bandit", "oxlint", "supply", "syft", "grype", "guarddog"}
+    # T6: ruff/vulture suffix-gated + deptry manifest-gated skip on empty too.
+    assert set(skips) == {"sast", "bandit", "oxlint", "supply", "syft", "grype", "guarddog", "ruff", "vulture", "deptry"}
     assert skips["sast"] == "no python or javascript files detected"
     assert skips["supply"] == "no python manifests detected"
 
@@ -474,7 +495,12 @@ def test_scan_diff_py_only_runs_bandit(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     result = asyncio.run(orchestrator.scan_diff(PY_DIFF))
     assert result["status"] == "ok"
-    assert "skipped" not in result
+    # T6: ruff/vulture forced missing + deptry always skipped in diffs.
+    assert result["skipped"] == {
+        "ruff": "ruff not installed: python lint lane skipped",
+        "vulture": "vulture not installed: dead-code lane skipped",
+        "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+    }
     assert result["languages"]["languages"] == ["python"]
     assert "bandit" in spawned_binaries(calls)
     rule_ids = {f["rule_id"] for f in result["findings"]}
@@ -488,7 +514,13 @@ def test_scan_diff_js_only_skips_bandit(monkeypatch: pytest.MonkeyPatch) -> None
     result = asyncio.run(orchestrator.scan_diff(JS_DIFF))
     assert result["status"] == "ok"
     assert result["languages"]["languages"] == ["javascript"]
-    assert result["skipped"] == {"bandit": "no python files in diff"}
+    # T6: suffix gates are deterministic (no which involved); deptry always skipped in diffs.
+    assert result["skipped"] == {
+        "bandit": "no python files in diff",
+        "ruff": "no python files in diff",
+        "vulture": "no python files in diff",
+        "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+    }
     assert "bandit" not in spawned_binaries(calls)
     assert "semgrep" in spawned_binaries(calls)
 
@@ -505,7 +537,12 @@ def test_scan_diff_mixed_bandit_runs_semgrep_covers_both(
     result = asyncio.run(orchestrator.scan_diff(MIXED_DIFF))
     assert result["status"] == "ok"
     assert result["languages"]["languages"] == ["python", "javascript"]
-    assert "skipped" not in result
+    # T6: ruff/vulture forced missing + deptry always skipped in diffs.
+    assert result["skipped"] == {
+        "ruff": "ruff not installed: python lint lane skipped",
+        "vulture": "vulture not installed: dead-code lane skipped",
+        "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+    }
     assert "bandit" in spawned_binaries(calls)
     semgrep_argvs = [a for a in calls if Path(str(a[0])).name == "semgrep"]
     # T2 split: one invocation per language group (python: rules/python, js: rules/frontend).
@@ -539,7 +576,12 @@ def test_scan_diff_mixed_findings_identical_to_ungated(
     result = asyncio.run(orchestrator.scan_diff(MIXED_DIFF))
     expected = normalize_findings(normalize_semgrep(semgrep_raw) + normalize_bandit(bandit_raw))
     assert result["findings"] == expected
-    assert "skipped" not in result
+    # T6: ruff/vulture forced missing + deptry always skipped in diffs.
+    assert result["skipped"] == {
+        "ruff": "ruff not installed: python lint lane skipped",
+        "vulture": "vulture not installed: dead-code lane skipped",
+        "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+    }
 
 
 # --- scan_repo routing ---------------------------------------------------------
@@ -554,12 +596,16 @@ def test_scan_repo_py_only_skips_oxlint(monkeypatch: pytest.MonkeyPatch) -> None
     # T3: trufflehog verify is opt-in, always reported skipped by default.
     # T4: syft/grype binaries absent here -> missing-binary skips.
     # T5: guarddog binary absent here -> missing-binary skip.
+    # T6: ruff/vulture/deptry forced missing (hermetic everywhere).
     assert result["skipped"] == {
         "oxlint": "no javascript files or markers detected",
         "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
         "syft": "syft not installed: SBOM store skipped",
         "grype": "syft SBOM unavailable: no SBOM to match",
         "guarddog": "guarddog not installed: heuristics lane skipped",
+        "ruff": "ruff not installed: python lint lane skipped",
+        "vulture": "vulture not installed: dead-code lane skipped",
+        "deptry": "deptry not installed: dependency-hygiene lane skipped",
     }
     binaries = spawned_binaries(calls)
     assert "bandit" in binaries
@@ -574,6 +620,7 @@ def test_scan_repo_js_only_skips_bandit_and_supply(
     result = asyncio.run(orchestrator.scan_repo(str(FIXTURES / "js-only")))
     assert result["status"] == "ok"
     assert result["languages"]["languages"] == ["javascript"]
+    # T6: suffix/manifest gates are deterministic (no which involved).
     assert result["skipped"] == {
         "bandit": "no python files or markers detected",
         "supply": "no python manifests detected",
@@ -581,6 +628,9 @@ def test_scan_repo_js_only_skips_bandit_and_supply(
         "syft": "syft not installed: SBOM store skipped",
         "grype": "syft SBOM unavailable: no SBOM to match",
         "guarddog": "guarddog not installed: heuristics lane skipped",
+        "ruff": "no python files or markers detected",
+        "vulture": "no python files or markers detected",
+        "deptry": "no python manifests detected",
     }
     binaries = spawned_binaries(calls)
     assert "oxlint" in binaries
@@ -597,8 +647,10 @@ def test_scan_repo_container_only_skips_code_lanes(
     assert result["languages"]["languages"] == ["containers"]
     assert result["languages"]["containers"] is True
     # T5: container-only has no manifests -> guarddog gate skip.
+    # T6: ruff/vulture/deptry gate-skipped (deterministic, no which involved).
     assert set(result["skipped"]) == {
         "sast", "bandit", "oxlint", "supply", "trufflehog", "syft", "grype", "guarddog",
+        "ruff", "vulture", "deptry",
     }
     binaries = spawned_binaries(calls)
     assert {"trivy", "checkov"} <= binaries
@@ -639,11 +691,15 @@ def test_scan_repo_mixed_findings_identical_to_ungated(
     # T3: trufflehog verify is opt-in, reported skipped even on mixed fixtures.
     # T4: syft/grype binaries absent here -> missing-binary skips.
     # T5: guarddog binary absent here -> missing-binary skip.
+    # T6: ruff/vulture/deptry forced missing (hermetic everywhere).
     assert result["skipped"] == {
         "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
         "syft": "syft not installed: SBOM store skipped",
         "grype": "syft SBOM unavailable: no SBOM to match",
         "guarddog": "guarddog not installed: heuristics lane skipped",
+        "ruff": "ruff not installed: python lint lane skipped",
+        "vulture": "vulture not installed: dead-code lane skipped",
+        "deptry": "deptry not installed: dependency-hygiene lane skipped",
     }
     assert result["languages"]["languages"] == ["python", "javascript"]
     assert result["languages"]["typescript"] is True

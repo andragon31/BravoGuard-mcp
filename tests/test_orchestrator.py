@@ -262,6 +262,16 @@ def test_all_scanners_missing_stays_ok_with_errors(
 ) -> None:
     calls: list = []
     install_fake(monkeypatch, {}, calls)
+    # Hermetic T6: ruff ships on some dev machines — force the new lanes
+    # missing so the exact errors set holds everywhere.
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda name: None
+        if Path(str(name)).name in {"ruff", "vulture", "deptry"}
+        else real_which(str(name)),
+    )
     result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))
     assert result["status"] == "ok"
     assert result["findings"] == []

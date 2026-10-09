@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "tools-manifest.json"
 
-PYTHON_TOOLS = ["semgrep", "bandit", "pip-audit", "guarddog", "ruff"]
+PYTHON_TOOLS = ["semgrep", "bandit", "pip-audit", "guarddog", "ruff", "deptry", "vulture"]
 CORE_BINARIES = ["osv-scanner", "syft", "trivy", "checkov", "betterleaks", "trufflehog", "oxlint"]
 OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "madge", "jscpd"]
 

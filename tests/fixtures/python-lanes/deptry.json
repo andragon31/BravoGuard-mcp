@@ -1,0 +1,26 @@
+[
+    {
+        "error": {
+            "code": "DEP002",
+            "message": "'requests' defined as a dependency but not used in the codebase"
+        },
+        "module": "requests",
+        "location": {
+            "file": "pyproject.toml",
+            "line": null,
+            "column": null
+        }
+    },
+    {
+        "error": {
+            "code": "DEP001",
+            "message": "'totally_missing_pkg_xyz' imported but missing from the dependency definitions"
+        },
+        "module": "totally_missing_pkg_xyz",
+        "location": {
+            "file": "src/app.py",
+            "line": 2,
+            "column": 8
+        }
+    }
+]

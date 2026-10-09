@@ -304,7 +304,13 @@ def test_scan_diff_empty_after_filter_ok(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result["findings"] == []
     # T1 routing: fully-filtered diff spawns zero binaries (bandit skipped).
     assert calls == []
-    assert result["skipped"] == {"bandit": "no python files in diff"}
+    # T6: suffix gates are deterministic (no which involved); deptry always skipped in diffs.
+    assert result["skipped"] == {
+        "bandit": "no python files in diff",
+        "ruff": "no python files in diff",
+        "vulture": "no python files in diff",
+        "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+    }
 
 
 def _spy_staging(monkeypatch: pytest.MonkeyPatch, seen: dict) -> None:

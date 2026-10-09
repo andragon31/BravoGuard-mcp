@@ -82,6 +82,13 @@ LANE_GATES: dict[str, dict[str, Any]] = {
     # own typosquat lane (different axis), so it gates on either manifest
     # group — python manifests feed the pypi side, package.json the npm side.
     "guarddog": {"kind": "manifest", "manifests": ("python", "javascript")},
+    # T6 choice (documented): ruff + vulture are suffix-gated on python
+    # (they read .py source, so markers alone never qualify them), while
+    # deptry is manifest-gated on python (it reads requirements manifests
+    # and pyproject dependencies — no manifests, no run).
+    "ruff": {"kind": "suffix", "languages": ("python",)},
+    "vulture": {"kind": "suffix", "languages": ("python",)},
+    "deptry": {"kind": "manifest", "manifests": ("python",)},
 }
 
 # Machine-readable skip reasons, one per gated lane (T2+ adds its own).
@@ -93,6 +100,9 @@ SKIP_REASONS: dict[str, str] = {
     "syft": "no python, javascript, or container signals detected",
     "grype": "no python, javascript, or container signals detected",
     "guarddog": "no python or npm manifests detected",
+    "ruff": "no python files or markers detected",
+    "vulture": "no python files or markers detected",
+    "deptry": "no python manifests detected",
 }
 
 

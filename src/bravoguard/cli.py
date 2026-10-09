@@ -33,7 +33,7 @@ CACHE_DB = Path.home() / ".cache" / "bravoguard" / "cache.db"
 # Overridable for forks: BRAVO_GITHUB_REPO=Owner/BravoGuard-mcp
 GITHUB_REPO = "Andragon/BravoGuard-mcp"
 
-PYTHON_TOOLS = ["semgrep", "bandit", "pip-audit", "guarddog", "ruff"]
+PYTHON_TOOLS = ["semgrep", "bandit", "pip-audit", "guarddog", "ruff", "deptry", "vulture"]
 CORE_BINARIES = ["osv-scanner", "syft", "trivy", "checkov", "betterleaks", "trufflehog", "oxlint"]
 OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "madge", "jscpd"]
 

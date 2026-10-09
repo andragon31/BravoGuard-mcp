@@ -8,6 +8,13 @@ Single source for the finding schema and all scanner parsers:
 - Secrets verify: trufflehog ``filesystem --json --results=verified`` JSONL
   (Raw/RawV2 values are never read; verified live credentials -> CRITICAL).
 - Frontend: oxlint ``--format json`` (``diagnostics`` list).
+- Python lint: ruff ``check --output-format json`` without S rules (bandit
+  owns security; ``rule_id`` is ``ruff-<code>``, severity LOW-only — the
+  selected linters document maintainability risks, never security ones).
+- Python dead code: vulture ``path:line: message (NN%)`` text lines
+  (``rule_id`` is ``vulture-<slug>``, LOW, remove-or-whitelist hint).
+- Python deps: deptry ``--json-output`` issues (``rule_id`` is
+  ``deptry-<code>``, LOW, pin/remove/declare hint).
 - Container/IaC/license: trivy ``fs --format json`` (``Results`` list).
 - IaC: checkov ``-o json`` (``results.failed_checks``).
 - Supply: typosquat + bundled-binary findings pass through
@@ -29,7 +36,9 @@ fix_hint, epss, kev, reachability_note``. ``epss`` is a float in [0, 1] or
 
 Severity honesty (M1 multi-lane): engines without exploit context never emit
 CRITICAL on their own authority. oxlint maps ``error`` -> MEDIUM and
-everything else -> LOW (lint signal, no CVE, never above MEDIUM); trivy
+everything else -> LOW (lint signal, no CVE, never above MEDIUM); ruff is
+stricter still (LOW-only: the no-S select carries no security-adjacent
+rule, so nothing qualifies for MEDIUM); trivy
 and checkov pass their feed severity through but cap CRITICAL -> HIGH
 and default blanks to MEDIUM (checkov omits ``severity`` for many graph
 checks). ``cwe`` is ``""`` where the engine carries no mapping (oxlint
@@ -327,6 +336,187 @@ def normalize_oxlint(payload: Any) -> list[dict[str, Any]]:
                 _oxlint_severity(item.get("severity")),
                 item.get("message"),
                 item.get("help"),
+            )
+        )
+    return findings
+
+
+def _ruff_fix_hint(item: dict[str, Any]) -> str:
+    """Fix hint from the ruff fix record plus the rule-docs URL."""
+    url = str(item.get("url") or "")
+    fix = item.get("fix")
+    if isinstance(fix, dict):
+        detail = fix.get("message") or "automatic fix available"
+        base = f"Ruff suggests a fix: {detail} (run `ruff check --fix`)."
+    else:
+        base = "No automatic fix; address manually."
+    return f"{base} Docs: {url}" if url else base
+
+
+def normalize_ruff(payload: Any) -> list[dict[str, Any]]:
+    """Map ruff ``check --output-format json`` items to the unified shape.
+
+    Real shape (ruff 0.16.5, verified live): a list of ``{"code",
+    "message", "filename", "location": {"row", "column"}, "url",
+    "fix": {...} | null, "severity"}``. Rules become ``ruff-<code>``
+    (the ``ruff-`` namespace keeps bandit findings distinct by
+    construction); ``cwe`` stays empty (lint codes do not map to CWEs).
+    Severity is LOW-only: the lane select (``E,F,W,I,N,UP,B,A,C4,SIM``)
+    holds style/correctness/import/naming/modernization linters whose rule
+    docs describe maintainability risks, never a security-adjacent risk —
+    no rule in the set meets the bar for MEDIUM, and the S family (the one
+    that would) is excluded because bandit owns it. The engine ``severity``
+    field is deliberately ignored (same lint-signal policy as oxlint).
+    """
+    items = payload if isinstance(payload, list) else []
+    findings = []
+    for item in items:
+        if not isinstance(item, dict) or not item.get("code"):
+            continue
+        location = item.get("location")
+        line = location.get("row") if isinstance(location, dict) else 0
+        findings.append(
+            make_finding(
+                f"ruff-{item.get('code', 'unknown')}",
+                "",
+                item.get("filename"),
+                line,
+                "LOW",
+                item.get("message"),
+                _ruff_fix_hint(item),
+            )
+        )
+    return findings
+
+
+_VULTURE_LINE_RE = re.compile(r"^(.*?):(\d+):\s+(.*?)\s+\((\d+)%[^)]*\)\s*$")
+_VULTURE_KIND_RE = re.compile(r"^unused\s+(\w+)", re.IGNORECASE)
+_VULTURE_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+VULTURE_FIX_HINT = (
+    "Remove the dead code, or add it to the vulture whitelist "
+    "(whitelist.py) if it is used dynamically or is a plugin API."
+)
+
+
+def _vulture_slug(message: str) -> str:
+    """``unused function 'f'`` -> ``unused-function`` (fallback: slugified text)."""
+    match = _VULTURE_KIND_RE.match((message or "").strip())
+    if match:
+        return f"unused-{match.group(1).lower()}"
+    slug = _VULTURE_SLUG_RE.sub("-", (message or "").strip().lower()).strip("-")
+    return slug[:40] or "unused-code"
+
+
+def parse_vulture_output(text: Any, min_confidence: int = 60) -> list[dict[str, Any]]:
+    """Parse vulture ``path:line: message (NN%)`` text lines to raw entries.
+
+    Vulture 2.16 has no JSON output (verified live via ``vulture --help``),
+    so this tolerant line parser is the contract: malformed lines are
+    skipped (never an error), and entries below ``min_confidence`` are
+    dropped as a defense-in-depth floor (the engine already filters via
+    ``--min-confidence``). Returns ``{path, line, message, confidence}``
+    dicts for :func:`normalize_vulture`.
+    """
+    if not isinstance(text, str):
+        return []
+    entries = []
+    for line in text.splitlines():
+        match = _VULTURE_LINE_RE.match(line.strip())
+        if match is None:
+            continue
+        try:
+            confidence = int(match.group(4))
+        except (TypeError, ValueError):
+            continue
+        if confidence < min_confidence:
+            continue
+        entries.append(
+            {
+                "path": match.group(1),
+                "line": _safe_line(match.group(2)),
+                "message": match.group(3),
+                "confidence": confidence,
+            }
+        )
+    return entries
+
+
+def normalize_vulture(payload: Any) -> list[dict[str, Any]]:
+    """Map parsed vulture entries to the unified finding shape.
+
+    Findings are LOW (dead code is latent attack surface, not a live vuln),
+    ``rule_id`` is ``vulture-<slug>``, ``cwe`` stays empty (no mapping),
+    and the fix hint is remove-or-whitelist. Accepts the
+    :func:`parse_vulture_output` list; anything else yields ``[]``.
+    """
+    items = payload if isinstance(payload, list) else []
+    findings = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        message = str(entry.get("message") or "unused code")
+        findings.append(
+            make_finding(
+                f"vulture-{_vulture_slug(message)}",
+                "",
+                entry.get("path"),
+                entry.get("line", 0),
+                "LOW",
+                f"Dead code ({entry.get('confidence', 0)}% confidence): {message}.",
+                VULTURE_FIX_HINT,
+            )
+        )
+    return findings
+
+
+# Per-code fix guidance: declare (missing), remove (unused/stdlib),
+# pin-direct (transitive), move-to-dev (misplaced). Unknown codes fall back
+# to the generic review hint (never a fabricated per-code claim).
+DEPTRY_FIX_HINTS: dict[str, str] = {
+    "DEP001": "Declare it: add the module to dependencies (or remove the import).",
+    "DEP002": "Remove it from dependencies (or move to dev/optional if tests use it).",
+    "DEP003": "Pin it as a direct dependency: add the module to dependencies.",
+    "DEP004": "Move it to development/optional dependencies.",
+    "DEP005": "Remove it: the module is standard library, not a third-party dep.",
+}
+DEPTRY_GENERIC_FIX_HINT = (
+    "Review the dependency declaration: pin, remove, or declare per the issue."
+)
+
+
+def normalize_deptry(payload: Any) -> list[dict[str, Any]]:
+    """Map deptry ``--json-output`` issues to the unified finding shape.
+
+    Recorded shape (deptry 0.25.1, verified live): a list of ``{"error":
+    {"code", "message"}, "module", "location": {"file", "line",
+    "column"}}``. Rules are ``deptry-<code>`` (e.g. ``deptry-DEP002``);
+    severity is LOW (dependency hygiene, not a live vuln); ``cwe`` stays
+    empty (no mapping); paths are relative to the scanned project root
+    (deptry emits them that way, same as grype SBOM locations).
+    """
+    items = payload if isinstance(payload, list) else []
+    findings = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        error = item.get("error")
+        error = error if isinstance(error, dict) else {}
+        code = str(error.get("code") or "unknown")
+        location = item.get("location")
+        location = location if isinstance(location, dict) else {}
+        module = str(item.get("module") or "")
+        message = str(error.get("message") or code)
+        text = f"{module}: {message}" if module else message
+        findings.append(
+            make_finding(
+                f"deptry-{code}",
+                "",
+                location.get("file"),
+                location.get("line", 0),
+                "LOW",
+                text,
+                DEPTRY_FIX_HINTS.get(code, DEPTRY_GENERIC_FIX_HINT),
             )
         )
     return findings

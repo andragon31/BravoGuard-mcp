@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import shutil
 import time
 from pathlib import Path
 
@@ -61,7 +62,23 @@ class FakeProcess:
         return self.returncode
 
 
+def _force_py_lanes_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetic T6: ruff ships on some dev machines — force the new lanes
+    missing so skips (never errors) are deterministic everywhere."""
+    real_which = shutil.which
+    _missing = {"ruff", "vulture", "deptry"}
+
+    def _which(name: str) -> str | None:
+        if Path(str(name)).name in _missing:
+            return None
+        return real_which(name)
+
+    monkeypatch.setattr(shutil, "which", _which)
+
+
 def install_fake(monkeypatch: pytest.MonkeyPatch, calls: list) -> None:
+    _force_py_lanes_missing(monkeypatch)
+
     async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
         calls.append(list(argv))
         name = Path(str(argv[0])).name
@@ -262,6 +279,8 @@ def test_osv_lookup_fetcher_write_through() -> None:
 
 
 def _missing_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_py_lanes_missing(monkeypatch)
+
     async def fake_create(*argv: str, **kwargs: object):
         raise FileNotFoundError(str(argv[0]))
 
@@ -296,6 +315,11 @@ def test_cache_hit_preserves_errors(monkeypatch: pytest.MonkeyPatch) -> None:
             return FakeProcess(json.dumps({"results": []}).encode(), 0)
         if name == "betterleaks":
             return FakeProcess(b"[]", 0)
+        # T6 lanes emulated empty: deterministic with or without binaries.
+        if name == "ruff":
+            return FakeProcess(b"[]", 0)
+        if name == "vulture":
+            return FakeProcess(b"", 0)
         raise FileNotFoundError(name)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)

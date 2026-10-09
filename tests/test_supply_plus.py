@@ -8,6 +8,7 @@ opengrep release-binary installer chain (mocked network).
 import asyncio
 import importlib.util
 import io
+import shutil
 import sys
 from pathlib import Path
 
@@ -198,7 +199,23 @@ class _FakeProcess:
         return self.returncode
 
 
+def _force_py_lanes_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hermetic T6: ruff ships on some dev machines — force the new lanes
+    missing so skips (never errors) are deterministic everywhere."""
+    real_which = shutil.which
+    _missing = {"ruff", "vulture", "deptry"}
+
+    def _which(name: str) -> str | None:
+        if Path(str(name)).name in _missing:
+            return None
+        return real_which(name)
+
+    monkeypatch.setattr(shutil, "which", _which)
+
+
 def _quiet_subprocesses(monkeypatch: pytest.MonkeyPatch) -> None:
+    _force_py_lanes_missing(monkeypatch)
+
     async def fake_create(*argv: str, **kwargs: object) -> _FakeProcess:
         names = {Path(str(a)).name for a in argv}
         if "oxlint" in names:

@@ -1,0 +1,110 @@
+[
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 10,
+      "row": 1
+    },
+    "filename": "pkg/sample.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 1,
+            "row": 2
+          },
+          "location": {
+            "column": 1,
+            "row": 1
+          }
+        }
+      ],
+      "message": "Remove unused import: `os`"
+    },
+    "location": {
+      "column": 8,
+      "row": 1
+    },
+    "message": "`os` imported but unused",
+    "name": "unused-import",
+    "noqa_row": 1,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "E501",
+    "end_location": {
+      "column": 112,
+      "row": 12
+    },
+    "filename": "pkg/sample.py",
+    "fix": null,
+    "location": {
+      "column": 101,
+      "row": 12
+    },
+    "message": "Line too long (111 > 100)",
+    "name": "line-too-long",
+    "noqa_row": 12,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/line-too-long"
+  },
+  {
+    "cell": null,
+    "code": "B006",
+    "end_location": {
+      "column": 20,
+      "row": 20
+    },
+    "filename": "pkg/sample.py",
+    "fix": null,
+    "location": {
+      "column": 13,
+      "row": 20
+    },
+    "message": "Do not use mutable data structures for argument defaults",
+    "name": "mutable-argument-default",
+    "noqa_row": 20,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/mutable-argument-default"
+  },
+  {
+    "cell": null,
+    "code": "F841",
+    "end_location": {
+      "column": 12,
+      "row": 25
+    },
+    "filename": "pkg/other.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "",
+          "end_location": {
+            "column": 12,
+            "row": 25
+          },
+          "location": {
+            "column": 5,
+            "row": 25
+          }
+        }
+      ],
+      "message": "Remove assignment to unused variable `tmp`"
+    },
+    "location": {
+      "column": 5,
+      "row": 25
+    },
+    "message": "Local variable `tmp` is assigned to but never used",
+    "name": "unused-variable",
+    "noqa_row": 25,
+    "severity": "warning",
+    "url": "https://docs.astral.sh/ruff/rules/unused-variable"
+  }
+]

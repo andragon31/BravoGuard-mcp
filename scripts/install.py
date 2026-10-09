@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "tools-manifest.json"
 INSTALL_TIMEOUT = 300
 
-PYTHON_TOOLS = ["semgrep", "bandit", "guarddog", "pip-audit", "ruff"]
+PYTHON_TOOLS = ["semgrep", "bandit", "guarddog", "pip-audit", "ruff", "deptry", "vulture"]
 CORE_BINARIES = ["osv-scanner", "syft", "trivy", "checkov", "betterleaks", "trufflehog", "oxlint"]
 OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "madge", "jscpd"]
 

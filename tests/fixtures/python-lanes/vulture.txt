@@ -1,0 +1,9 @@
+pkg/sample.py:1: unused import 'os' (90% confidence)
+pkg/sample.py:4: unused variable 'UNUSED_CONST' (60% confidence)
+pkg/sample.py:7: unused function 'unused_helper' (60% confidence)
+pkg/sample.py:9: unused variable 'low_signal' (55% confidence)
+pkg/edge.py:3: unused class 'OldClass' (100% confidence)
+malformed line without numbers
+pkg/broken.py: not-a-line: garbage words here
+pkg/noconf.py:5: something without confidence
+

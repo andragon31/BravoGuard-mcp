@@ -31,6 +31,12 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
   gated per side; win32 skipped per the cli.py nono-py precedent; complements
   the own typosquat lane on the heuristics axis). ``scan_diff`` stays
   untouched (diffs lack dependency context).
+- Python depth (T6): ``ruff check --output-format json`` without S rules
+  (bandit owns security) plus ``vulture --min-confidence 60`` dead-code
+  text lines, both over explicit python files (suffix-gated, diff + repo);
+  ``deptry --json-output`` over the project root (manifest-gated on
+  requirements manifests / pyproject with dependencies; repo only — diffs
+  lack dependency context, same rationale as supply/guarddog).
 - IaC: ``uv tool run --from checkov checkov -d <target> -o json`` (M1; the
   bare ``checkov`` shim is broken on Windows, ``uv tool run`` is proven).
 
@@ -126,6 +132,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -143,15 +150,19 @@ from bravoguard.normalizer import (
     normalize_bandit,
     normalize_betterleaks,
     normalize_checkov,
+    normalize_deptry,
     normalize_findings,
     normalize_grype,
     normalize_guarddog,
     normalize_oxlint,
+    normalize_ruff,
     normalize_semgrep,
     normalize_supply,
     normalize_syft,
     normalize_trivy,
     normalize_trufflehog,
+    normalize_vulture,
+    parse_vulture_output,
 )
 from bravoguard.supply import scan_supply
 
@@ -166,6 +177,9 @@ OXLINT_ENGINE = "oxlint"
 TRIVY_ENGINE = "trivy"
 CHECKOV_ENGINE = "checkov"
 TRUFFLEHOG_ENGINE = "trufflehog"
+RUFF_ENGINE = "ruff"
+VULTURE_ENGINE = "vulture"
+DEPTRY_ENGINE = "deptry"
 SYFT_ENGINE = "syft"
 GRYPE_ENGINE = "grype"
 GUARDDOG_ENGINE = "guarddog"
@@ -178,6 +192,34 @@ SYFT_IDLE_REASON = "grype not installed: SBOM store unused without matcher"
 
 # Opt-in reason for the trufflehog verify lane (surfaced as skipped+reason).
 TRUFFLEHOG_OPT_IN_REASON = "trufflehog verify is opt-in: pass verify_secrets=True"
+
+# Ruff lint select (T6): style/correctness/import/naming/modernization only.
+# S (flake8-bandit) is excluded on purpose — bandit owns the security signal
+# (S is flake8-bandit per ``ruff linter``; verified overlap), so selecting it
+# would double-report bandit findings under a second rule id. Ruff prefix
+# selection is linter-aware (verified live on ruff 0.16.5: ``--select F``
+# enables Pyflakes only, not FAST/FBT/FIX — same for B/BLE, A/ASYNC, I/ICN,
+# E/EM/ERA), so these prefixes cannot smuggle S rules in. None of these
+# linters needs extra config (no preview flag, no banned-API lists).
+RUFF_SELECT_PREFIXES: tuple[str, ...] = ("E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM")
+RUFF_LINE_LENGTH = 100
+
+# Vulture confidence floor (T6): 60 == vulture's own default (verified live:
+# bare ``vulture mod.py`` and ``--min-confidence 60`` emit identical
+# output), so the explicit flag documents the threshold without changing
+# engine behavior.
+VULTURE_MIN_CONFIDENCE = 60
+
+# T6 skip reasons for the Python depth lanes (surfaced as skipped+reason).
+RUFF_MISSING_REASON = "ruff not installed: python lint lane skipped"
+VULTURE_MISSING_REASON = "vulture not installed: dead-code lane skipped"
+DEPTRY_MISSING_REASON = "deptry not installed: dependency-hygiene lane skipped"
+DEPTRY_NO_MANIFEST_REASON = (
+    "deptry manifest-gated: no requirements manifests or pyproject dependencies"
+)
+DEPTRY_DIFF_REASON = (
+    "deptry needs a project root with manifests: scan_diff lacks dependency context"
+)
 
 # T5 skip reasons for the guarddog heuristics lane (surfaced as skipped+reason).
 GUARDDOG_WIN32_REASON = (
@@ -249,15 +291,17 @@ __all__ = [
     "normalize_bandit",
     "normalize_betterleaks",
     "normalize_checkov",
+    "normalize_deptry",
     "normalize_findings",
     "normalize_grype",
     "normalize_guarddog",
     "normalize_oxlint",
-    "normalize_semgrep",
+    "normalize_ruff",
     "normalize_supply",
     "normalize_syft",
     "normalize_trivy",
     "normalize_trufflehog",
+    "normalize_vulture",
     "resolve_secrets_binary",
 ]
 
@@ -1094,6 +1138,207 @@ async def _run_guarddog(target: str, timeout: float) -> tuple[str, Any]:
     return "guarddog", {"results": scans}
 
 
+def ruff_argv(
+    files: list[str | Path] | tuple[str | Path, ...],
+) -> list[str]:
+    """Python lint as JSON over explicit files (no S rules — see ``RUFF_SELECT_PREFIXES``).
+
+    ``--output-format json`` and ``--line-length`` verified in ``ruff check
+    --help`` (ruff 0.16.5); ``--no-cache`` never writes ``.ruff_cache`` into
+    scanned trees; ``--line-length 100`` is the repo convention
+    (``pyproject [tool.ruff]``). Explicit file argv means excludes are
+    enforced by enumeration (same as the SAST lane) — no ``--exclude`` flag
+    needed. Callers skip empty file lists (no spawn).
+    """
+    return [
+        RUFF_ENGINE,
+        "check",
+        "--output-format",
+        "json",
+        "--no-cache",
+        "--line-length",
+        str(RUFF_LINE_LENGTH),
+        "--select",
+        ",".join(RUFF_SELECT_PREFIXES),
+        *(str(item) for item in files),
+    ]
+
+
+def vulture_argv(
+    files: list[str | Path] | tuple[str | Path, ...],
+) -> list[str]:
+    """Dead-code scan over explicit files as ``path:line: message (NN%)`` text.
+
+    Vulture 2.16 has no JSON output (verified live via ``vulture --help``),
+    so :func:`bravoguard.normalizer.parse_vulture_output` parses stdout.
+    ``--min-confidence`` verified in the same help; the value is
+    :data:`VULTURE_MIN_CONFIDENCE`. Explicit file argv enforces excludes
+    by enumeration (same as ruff/SAST). Callers skip empty lists (no spawn).
+    """
+    return [
+        VULTURE_ENGINE,
+        *(str(item) for item in files),
+        "--min-confidence",
+        str(VULTURE_MIN_CONFIDENCE),
+    ]
+
+
+def _deptry_exclude_values(patterns: tuple[str, ...]) -> list[str]:
+    """Translate excludes to deptry ``--extend-exclude`` regex values.
+
+    Same :func:`fnmatch.translate` approach as :func:`_checkov_skip_values`
+    (deptry matches with ``re.match``). Extend-only on purpose:
+    ``--exclude`` OVERWRITES deptry defaults (``venv, .venv, tests, .git``
+    per ``deptry --help``), while ``--extend-exclude`` adds on top of them.
+    """
+    return [regex for regex in dict.fromkeys(fnmatch.translate(p) for p in patterns)]
+
+
+def deptry_argv(
+    target: str, report: str, exclude: list[str] | tuple[str, ...] | None = None
+) -> list[str]:
+    """Dependency-hygiene scan of a project root, JSON summary to ``report``.
+
+    Flags verified live via ``deptry --help`` (deptry 0.25.1, isolated
+    ``uvx`` run): the ROOT positional is the project root, ``--no-ansi``
+    keeps stdout plain text, ``--json-output FILE`` writes the issue list
+    (stdout carries a text summary only, so the caller reads the report
+    file and ignores stdout — same tmpfile shape as the gitleaks leg).
+    """
+    argv = [DEPTRY_ENGINE, target, "--no-ansi", "--json-output", report]
+    for regex in _deptry_exclude_values(tuple(exclude or ())):
+        argv += ["--extend-exclude", regex]
+    return argv
+
+
+def _has_pyproject_dependencies(path: Path) -> bool:
+    """True when ``pyproject.toml`` declares a ``[project].dependencies`` key."""
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    project = data.get("project")
+    return isinstance(project, dict) and "dependencies" in project
+
+
+def _deptry_manifests(target: Path) -> list[Path]:
+    """Deptry scan manifests: ``requirements*.txt`` + pyproject-with-dependencies.
+
+    Manifest-gated per spec: requirements manifests always count; a
+    ``pyproject.toml`` counts only with a ``[project].dependencies`` key (a
+    bare name/version declares nothing to check). ``setup.py``/``setup.cfg``
+    alone never qualify (spec scope). Bounded walk, no symlinks, never
+    inside ``.git``; sorted for deterministic order. A single manifest file
+    target counts for its own kind.
+    """
+    if target.is_file():
+        if target.name.startswith("requirements") and target.name.endswith(".txt"):
+            return [target]
+        if target.name == "pyproject.toml" and _has_pyproject_dependencies(target):
+            return [target]
+        return []
+    try:
+        entries = sorted(p for p in target.rglob("*") if ".git" not in p.parts)
+    except OSError:
+        return []
+    manifests = []
+    for path in entries[:GUARDDOG_MAX_WALK_FILES]:
+        if not path.is_file() or path.is_symlink():
+            continue
+        is_requirements = path.name.startswith("requirements") and path.name.endswith(".txt")
+        is_deps_pyproject = (
+            path.name == "pyproject.toml" and _has_pyproject_dependencies(path)
+        )
+        if is_requirements or is_deps_pyproject:
+            manifests.append(path)
+    return manifests
+
+
+def _python_files(target: Path, excludes: tuple[str, ...]) -> list[Path]:
+    """Python sources under ``target`` for the ruff/vulture lanes.
+
+    Reuses :func:`_enumerate_sast_files` (bounded, no symlinks, never
+    ``.git``, excludes honored) filtered to :data:`PYTHON_SUFFIXES`, so the
+    T6 lanes share the SAST enumeration discipline with zero new walk code.
+    """
+    return [
+        path
+        for path in _enumerate_sast_files(target, excludes)
+        if path.suffix.lower() in PYTHON_SUFFIXES
+    ]
+
+
+async def _run_ruff(
+    files: list[str | Path] | tuple[str | Path, ...], timeout: float
+) -> tuple[str, Any]:
+    """Lint lane over explicit files; empty list returns ok/empty with no spawn."""
+    if not files:
+        return "ruff", []
+    payload = await run_scanner_json(
+        ruff_argv(list(files)), input_data=None, timeout=timeout
+    )
+    return "ruff", payload
+
+
+async def _run_vulture(
+    files: list[str | Path] | tuple[str | Path, ...], timeout: float
+) -> tuple[str, Any]:
+    """Dead-code lane over explicit files (tolerant text parse, never JSON)."""
+    if not files:
+        return "vulture", []
+    payload = await run_scanner_json(
+        vulture_argv(list(files)),
+        input_data=None,
+        timeout=timeout,
+        parse=parse_vulture_output,
+    )
+    return "vulture", payload
+
+
+def _read_json_report(report: str, binary: str) -> Any:
+    """Read one ``--json-output`` report file (contents never logged).
+
+    A missing file means the engine ran but produced nothing; unparsable
+    JSON mirrors :func:`run_scanner_json` — both stay ``failed``.
+    """
+    try:
+        text = Path(report).read_text(encoding="utf-8")
+    except OSError:
+        raise OrchestratorError(f"scanner failed: {binary}") from None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        raise OrchestratorError(f"scanner returned invalid JSON: {binary}") from None
+
+
+async def _run_deptry(
+    target: str, timeout: float, exclude: tuple[str, ...] = ()
+) -> tuple[str, Any]:
+    """Dependency-hygiene lane via a ``--json-output`` tmpfile (gitleaks pattern).
+
+    Stdout carries a text summary only, so it is discarded and the report
+    file wins; the tmpfile is read once then deleted, never logged.
+    Callers gate on :func:`_deptry_manifests` first (no manifests, no run).
+    """
+    with tempfile.NamedTemporaryFile(
+        prefix="bravoguard-deptry-", suffix=".json", delete=False
+    ) as tmp:
+        report = tmp.name
+    with contextlib.suppress(OSError):
+        Path(report).unlink()
+    try:
+        await run_scanner_json(
+            deptry_argv(target, report, exclude),
+            input_data=None,
+            timeout=timeout,
+            parse=_ignore_scanner_stdout,
+        )
+        return "deptry", _read_json_report(report, DEPTRY_ENGINE)
+    finally:
+        with contextlib.suppress(OSError):
+            Path(report).unlink()
+
+
 async def _run_supply(target: Path, exclude: tuple[str, ...] = ()) -> tuple[str, Any]:
     """Supply lane: pure-Python typosquat + bundled-binary checks (H1).
 
@@ -1244,6 +1489,9 @@ _REPO_GATED_LANES: tuple[str, ...] = (
     "syft",
     "grype",
     "guarddog",
+    "ruff",
+    "vulture",
+    "deptry",
 )
 
 
@@ -1256,6 +1504,9 @@ _NORMALIZERS = {
     "checkov": normalize_checkov,
     "supply": normalize_supply,
     "guarddog": normalize_guarddog,
+    "ruff": normalize_ruff,
+    "vulture": normalize_vulture,
+    "deptry": normalize_deptry,
     "syft": normalize_syft,
     "trufflehog": normalize_trufflehog,
 }
@@ -1529,7 +1780,11 @@ async def scan_diff(
     scanner error or timeout, so finding content never lingers. The result
     carries ``languages`` (detect_languages over the materialized files);
     when no python files are in the diff, bandit is skipped with reason
-    "no python files in diff". Semgrep scans per language group via
+    "no python files in diff" (same suffix gate covers the ruff/vulture
+    lanes). The ruff + vulture lanes run over the materialized python files
+    (missing binaries report skipped+reason, never an error); deptry always
+    reports skipped+reason here (a materialized workdir is not a project
+    root with manifests). Semgrep scans per language group via
     :func:`_scan_sast_by_language` (python: ``rules/python`` +
     ``rules/supply-chain``; javascript: ``rules/frontend``; other: joint
     ``rules/``); empty groups are never invoked.
@@ -1555,8 +1810,14 @@ async def scan_diff(
         detection = detect_languages(workdir)
         py_files = _sast_targets_by_language(files)["python"]
         skipped: dict[str, str] = {}
+        # T6: deptry needs a project root with manifests — a materialized
+        # diff workdir is not a project (same rationale as guarddog/supply
+        # staying out of scan_diff), so it always reports skipped+reason here.
+        skipped["deptry"] = DEPTRY_DIFF_REASON
         if not py_files:
             skipped["bandit"] = "no python files in diff"
+            skipped["ruff"] = "no python files in diff"
+            skipped["vulture"] = "no python files in diff"
         # Single path-mode for both engines: files already exist, so the
         # workdir scan adds zero IO; gitleaks v8 rejects `--source -` (stdin FTL).
         secrets_job = (
@@ -1572,6 +1833,15 @@ async def scan_diff(
         ]
         if py_files:
             jobs.insert(1, ("bandit", _run_bandit(str(workdir), budget, excludes)))
+            # T6: missing-binary pre-checks (skipped+reason, never an error).
+            if shutil.which(RUFF_ENGINE) is None:
+                skipped["ruff"] = RUFF_MISSING_REASON
+            else:
+                jobs.append(("ruff", _run_ruff(py_files, budget)))
+            if shutil.which(VULTURE_ENGINE) is None:
+                skipped["vulture"] = VULTURE_MISSING_REASON
+            else:
+                jobs.append(("vulture", _run_vulture(py_files, budget)))
         result = await _collect(jobs)
         result["languages"] = detection
         if skipped:
@@ -1638,7 +1908,10 @@ async def scan_repo(
     SBOM in a second phase after
     the fan-out (it needs the syft store path), and its findings merge with
     a final :func:`normalize_findings` pass so the CVE secondary dedup
-    sees trivy + grype together.
+    sees trivy + grype together. The T6 python depth lanes join the fan-out
+    last (ruff + vulture over enumerated python files, deptry over the
+    project root): missing binaries and missing deptry manifests report
+    ``skipped`` + reason (never an error, never an attempted spawn).
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -1713,6 +1986,27 @@ async def scan_repo(
             jobs.append(("supply", _run_supply(target, excludes)))
         if "guarddog" not in skipped:
             jobs.append(("guarddog", _run_guarddog(str(target), budget)))
+        # T6: python depth lanes (suffix-gated ruff/vulture, manifest-gated
+        # deptry). Appended last so mixed-lane findings order is unchanged.
+        if "ruff" not in skipped:
+            if shutil.which(RUFF_ENGINE) is None:
+                skipped["ruff"] = RUFF_MISSING_REASON
+            else:
+                jobs.append(("ruff", _run_ruff(_python_files(target, excludes), budget)))
+        if "vulture" not in skipped:
+            if shutil.which(VULTURE_ENGINE) is None:
+                skipped["vulture"] = VULTURE_MISSING_REASON
+            else:
+                jobs.append(
+                    ("vulture", _run_vulture(_python_files(target, excludes), budget))
+                )
+        if "deptry" not in skipped:
+            if shutil.which(DEPTRY_ENGINE) is None:
+                skipped["deptry"] = DEPTRY_MISSING_REASON
+            elif not _deptry_manifests(target):
+                skipped["deptry"] = DEPTRY_NO_MANIFEST_REASON
+            else:
+                jobs.append(("deptry", _run_deptry(str(target), budget, excludes)))
         result = await _collect(jobs)
         # T4 second phase: grype matches the stored SBOM (sequential — it
         # needs the syft store path, so it cannot join the fan-out). Its
