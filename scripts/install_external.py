@@ -23,7 +23,7 @@ MANIFEST = ROOT / "tools-manifest.json"
 
 PYTHON_TOOLS = ["semgrep", "bandit", "pip-audit", "guarddog", "ruff", "deptry", "vulture"]
 CORE_BINARIES = ["osv-scanner", "syft", "trivy", "checkov", "betterleaks", "trufflehog", "oxlint", "hadolint", "kics"]
-OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "lockfile-lint", "madge", "jscpd", "dockle", "dive"]
+OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "lockfile-lint", "madge", "jscpd", "dockle", "dive", "conftest"]
 
 
 def check_python_tools() -> list[str]:

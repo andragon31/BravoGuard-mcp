@@ -59,6 +59,14 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   (7-day file cache) joined by CVE post-dedup, pre-sort — KEV-first/EPSS-desc ordering now acts
   on real values; fail-open (offline -> passthrough, zero CVEs -> zero network). osv_lookup is
   HTTP-first (api.osv.dev, no auth) with binary fallback preserved. 24 new tests.
+- T10 rules + policy + baseline (FINAL, `feature/bravoguard-py-js-containers`, `rules/python/` +
+  `rules/frontend/` + `policy/` + `src/bravoguard/orchestrator.py` + `src/bravoguard/server.py` +
+  `tools-manifest.json` + `scripts/install*.py` + `tests/test_rulepack.py` + `tests/test_policy.py` +
+  `tests/fixtures/rules/` + `tests/fixtures/policy/`): 6 portable ERROR rules (JWT none, yaml.load,
+  weak-random, SSRF requests/fetch, CORS wildcard — all CWE-verified, vuln+fixed fixtures),
+  conftest Rego gates (deny CRITICAL/verified-secret, warn HIGH-without-fix) with `policy_verdict`
+  (advisory, fail-open), baseline suppression + redact on the secrets lane. Conftest v0.71.1 pinned.
+  PRD Phase 3 closed. F821 ignored for rule-fixture snippets (documented). 27 new tests.
 - T8 containers lane (`feature/bravoguard-py-js-containers`, `src/bravoguard/orchestrator.py` +
   `src/bravoguard/normalizer.py` + `src/bravoguard/languages.py` + `src/bravoguard/suggest.py` +
   `src/bravoguard/server.py` + `tools-manifest.json` + `scripts/install.py` +

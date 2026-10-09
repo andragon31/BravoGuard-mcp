@@ -81,7 +81,8 @@ def _force_py_lanes_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     missing so skips (never errors) are deterministic everywhere."""
     real_which = shutil.which
     # T8: hadolint/kics pre-check (dockle/dive opt-in never spawn without container_image).
-    _missing = {"ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm", "oxlint", "hadolint", "kics"}
+    # T10: conftest pre-checks (policy advisory skips hermetically too).
+    _missing = {"ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm", "oxlint", "hadolint", "kics", "conftest"}
 
     def _which(name: str) -> str | None:
         if Path(str(name)).name in _missing:
@@ -523,6 +524,7 @@ def test_scan_diff_py_only_runs_bandit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["skipped"] == {
         "oxlint": "no javascript files in diff",
         "eslint": "no javascript files in diff",
+        "conftest": "conftest not installed: policy gates skipped",
         "ruff": "ruff not installed: python lint lane skipped",
         "vulture": "vulture not installed: dead-code lane skipped",
         "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
@@ -552,6 +554,7 @@ def test_scan_diff_js_only_skips_bandit(monkeypatch: pytest.MonkeyPatch) -> None
     assert result["skipped"] == {
         "oxlint": "oxlint not installed: frontend lint lane skipped",
         "bandit": "no python files in diff",
+        "conftest": "conftest not installed: policy gates skipped",
         "ruff": "no python files in diff",
         "vulture": "no python files in diff",
         "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
@@ -595,6 +598,7 @@ def test_scan_diff_mixed_bandit_runs_semgrep_covers_both(
         "kics": "kics needs whole compose/dockerfile context: scan_diff lacks file context",
         "dockle": "dockle needs scan_repo with container_image: scan_diff never builds images",
         "dive": "dive needs scan_repo with container_image: scan_diff never builds images",
+        "conftest": "conftest not installed: policy gates skipped",
     }
     assert "bandit" in spawned_binaries(calls)
     semgrep_argvs = [a for a in calls if Path(str(a[0])).name == "semgrep"]
@@ -644,6 +648,7 @@ def test_scan_diff_mixed_findings_identical_to_ungated(
         "kics": "kics needs whole compose/dockerfile context: scan_diff lacks file context",
         "dockle": "dockle needs scan_repo with container_image: scan_diff never builds images",
         "dive": "dive needs scan_repo with container_image: scan_diff never builds images",
+        "conftest": "conftest not installed: policy gates skipped",
     }
 
 
@@ -662,6 +667,7 @@ def test_scan_repo_py_only_skips_oxlint(monkeypatch: pytest.MonkeyPatch) -> None
     # T6: ruff/vulture/deptry forced missing (hermetic everywhere).
     # T7: eslint suffix-gated + knip/lockfile/npm manifest-gated on javascript.
     assert result["skipped"] == {
+        "conftest": "conftest not installed: policy gates skipped",
         "oxlint": "no javascript files or markers detected",
         "hadolint": "no container files or markers detected",
         "kics": "no compose or dockerfile targets detected",
@@ -694,6 +700,7 @@ def test_scan_repo_js_only_skips_bandit_and_supply(
     assert result["languages"]["languages"] == ["javascript"]
     # T6: suffix/manifest gates are deterministic (no which involved).
     assert result["skipped"] == {
+        "conftest": "conftest not installed: policy gates skipped",
         "bandit": "no python files or markers detected",
         "hadolint": "no container files or markers detected",
         "kics": "no compose or dockerfile targets detected",
@@ -731,7 +738,7 @@ def test_scan_repo_container_only_skips_code_lanes(
     assert set(result["skipped"]) == {
         "sast", "bandit", "oxlint", "supply", "trufflehog", "syft", "grype", "guarddog",
         "ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm-audit",
-        "hadolint", "kics", "dockle", "dive",
+        "hadolint", "kics", "dockle", "dive", "conftest",
     }
     binaries = spawned_binaries(calls)
     assert {"trivy", "checkov"} <= binaries
@@ -779,6 +786,7 @@ def test_scan_repo_mixed_findings_identical_to_ungated(
     # T5: guarddog binary absent here -> missing-binary skip.
     # T6: ruff/vulture/deptry forced missing (hermetic everywhere).
     assert result["skipped"] == {
+        "conftest": "conftest not installed: policy gates skipped",
         "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
         "hadolint": "no container files or markers detected",
         "kics": "no compose or dockerfile targets detected",

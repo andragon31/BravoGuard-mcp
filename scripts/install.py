@@ -35,7 +35,7 @@ INSTALL_TIMEOUT = 300
 
 PYTHON_TOOLS = ["semgrep", "bandit", "guarddog", "pip-audit", "ruff", "deptry", "vulture"]
 CORE_BINARIES = ["osv-scanner", "syft", "trivy", "checkov", "betterleaks", "trufflehog", "oxlint", "hadolint", "kics"]
-OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "lockfile-lint", "madge", "jscpd", "dockle", "dive"]
+OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "lockfile-lint", "madge", "jscpd", "dockle", "dive", "conftest"]
 
 NPM_PKGS = {
     "oxlint": "oxlint",
@@ -77,6 +77,7 @@ BREW_NAMES = {
     "trivy": "trivy",
     "grype": "grype",
     "trufflehog": "trufflehog",
+    "conftest": "conftest",
 }
 
 RELEASE_MARKER = "release"
@@ -90,6 +91,7 @@ RELEASE_REPOS = {
     "hadolint": "hadolint/hadolint",
     "dockle": "goodwithtech/dockle",
     "dive": "wagoodman/dive",
+    "conftest": "open-policy-agent/conftest",
 }
 
 # {ver} is the plain version without a leading v; the download tag keeps the
@@ -154,6 +156,15 @@ RELEASE_ASSETS = {
         "linux": "dive_{ver}_linux_amd64.tar.gz",
         "windows": "dive_{ver}_windows_amd64.zip",
         "macos": "dive_{ver}_darwin_arm64.tar.gz",
+    },
+    # T10 policy leg. Asset names verified LIVE via the GitHub release API
+    # (2026-10-09) against the pinned v0.71.1 tag: {ver} formats without
+    # the leading v (conftest_0.71.1_...). macos picks arm64 (current Apple
+    # hardware; Intel Macs use the brew fallback).
+    "conftest": {
+        "linux": "conftest_{ver}_Linux_x86_64.tar.gz",
+        "windows": "conftest_{ver}_Windows_x86_64.zip",
+        "macos": "conftest_{ver}_Darwin_arm64.tar.gz",
     },
 }
 
@@ -469,7 +480,8 @@ def binary_candidates(name: str, entry: dict, plat: str) -> tuple[list[list[str]
         cmds.append(["go", "install", f"{GO_MODULES[name]}@{go_tag(version)}"])
     if name in RELEASE_ASSETS:
         release = release_candidate(name, version, plat)
-        if name in ("trivy", "trufflehog", "opengrep", "hadolint", "dockle", "dive"):
+        if name in ("trivy", "trufflehog", "opengrep", "hadolint", "dockle", "dive",
+                    "conftest"):
             # go builds are known-broken (trivy toolchain pins, trufflehog
             # replace directives, opengrep malformed test path upstream) or
             # absent (hadolint is Haskell; dockle/dive have no verified go

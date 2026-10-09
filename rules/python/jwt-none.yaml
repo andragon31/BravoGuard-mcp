@@ -1,0 +1,14 @@
+rules:
+  - id: bravoguard-python-jwt-none
+    languages: [python]
+    severity: ERROR
+    message: Avoid JWT alg=none or disabled signature verification (CWE-347). An attacker can forge tokens without the key.
+    metadata:
+      cwe: "CWE-347"
+      owasp_2025: A04
+      fix_hint: "Pin algorithms to an explicit allowlist such as ['HS256'] and never accept 'none'; keep signature verification enabled."
+    patterns:
+      - pattern-either:
+          - pattern: jwt.decode(..., algorithms=[..., "none", ...], ...)
+          - pattern: 'jwt.decode(..., options={..., "verify_signature": False, ...}, ...)'
+          - pattern: jwt.decode(..., verify_signature=False, ...)

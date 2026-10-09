@@ -46,6 +46,8 @@ async def scan_diff(
     diff: str,
     cache_ttl: float | None = None,
     exclude: list[str] | None = None,
+    baseline: str | None = None,
+    redact: bool = False,
 ) -> dict:
     """Scan an inline unified diff for high-signal issues.
 
@@ -53,6 +55,10 @@ async def scan_diff(
     bandit + betterleaks stdin via the orchestrator, normalized to FINDING_KEYS.
     Cache-first (SQLite write-through); empty diffs and fully-degraded results
     bypass the cache. `exclude` overrides the default media/binary skip list.
+    `baseline` (path to a baseline file) and `redact` pass through to the
+    secrets lane; `redact` additionally strips secret-adjacent context from
+    finding messages. The conftest policy gates evaluate over the findings
+    and ride `policy_verdict` (missing binary reports skipped+reason).
     """
     if not diff.strip():
         return {"status": "empty-diff", "findings": []}
@@ -63,6 +69,8 @@ async def scan_diff(
             cache=_scan_cache(),
             cache_ttl=cache_ttl,
             exclude=exclude,
+            baseline=baseline,
+            redact=redact,
         ),
         timeout=DIFF_TIMEOUT_SECONDS,
     )
@@ -76,6 +84,8 @@ async def scan_repo(
     exclude: list[str] | None = None,
     verify_secrets: bool = False,
     container_image: str | None = None,
+    baseline: str | None = None,
+    redact: bool = False,
 ) -> dict:
     """Scan a local repository checkout and return unified findings.
 
@@ -92,7 +102,11 @@ async def scan_repo(
     efficiency lands in a top-level `recommendations[]` section
     (`source/rule_id/message/image` — efficiency is not a vulnerability).
     When None both lanes report `skipped` + reason; images are NEVER
-    auto-built.
+    auto-built. `baseline` (path to a baseline file) and `redact` pass
+    through to the secrets lane; `redact` additionally strips
+    secret-adjacent context from finding messages. The conftest policy gates
+    evaluate over the findings and ride `policy_verdict` (missing binary
+    reports skipped+reason, never fails the scan).
     """
     if not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -106,6 +120,8 @@ async def scan_repo(
             exclude=exclude,
             verify_secrets=verify_secrets,
             container_image=container_image,
+            baseline=baseline,
+            redact=redact,
         ),
         timeout=budget,
     )

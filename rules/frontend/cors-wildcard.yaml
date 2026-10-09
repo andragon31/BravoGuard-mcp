@@ -1,0 +1,15 @@
+rules:
+  - id: bravoguard-frontend-cors-wildcard
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Avoid Access-Control-Allow-Origin wildcard (CWE-942). A wildcard origin exposes responses cross-origin.
+    metadata:
+      cwe: "CWE-942"
+      owasp_2025: A02
+      fix_hint: "Replace '*' with an explicit allowlist of trusted origins; never use '*' together with credentials."
+    patterns:
+      - pattern-either:
+          - pattern: res.header("Access-Control-Allow-Origin", "*")
+          - pattern: res.setHeader("Access-Control-Allow-Origin", "*")
+          - pattern: res.set("Access-Control-Allow-Origin", "*")
+          - pattern: 'cors({..., origin: "*", ...})'

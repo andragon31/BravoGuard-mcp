@@ -1,0 +1,17 @@
+rules:
+  - id: bravoguard-python-ssrf-requests
+    languages: [python]
+    severity: ERROR
+    message: Avoid requests with a formatted-variable URL (CWE-918). An attacker-controlled host becomes server-side request forgery.
+    metadata:
+      cwe: "CWE-918"
+      owasp_2025: A01
+      fix_hint: "Validate the URL against an explicit allowlist of hosts and https scheme before the request."
+    patterns:
+      - pattern-either:
+          - pattern: requests.get(f"...", ...)
+          - pattern: requests.post(f"...", ...)
+          - pattern: requests.get($BASE + $PATH, ...)
+          - pattern: requests.post($BASE + $PATH, ...)
+          - pattern: requests.get("...".format(...), ...)
+          - pattern: requests.post("...".format(...), ...)

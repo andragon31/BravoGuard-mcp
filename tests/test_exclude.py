@@ -320,6 +320,7 @@ def test_scan_diff_empty_after_filter_ok(monkeypatch: pytest.MonkeyPatch) -> Non
         "kics": "kics needs whole compose/dockerfile context: scan_diff lacks file context",
         "dockle": "dockle needs scan_repo with container_image: scan_diff never builds images",
         "dive": "dive needs scan_repo with container_image: scan_diff never builds images",
+        "conftest": "conftest not installed: policy gates skipped",
     }
 
 

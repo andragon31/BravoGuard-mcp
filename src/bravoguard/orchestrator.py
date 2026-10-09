@@ -149,6 +149,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -231,8 +232,26 @@ HADOLINT_ENGINE = "hadolint"
 KICS_ENGINE = "kics"
 DOCKLE_ENGINE = "dockle"
 DIVE_ENGINE = "dive"
+CONFTEST_ENGINE = "conftest"
 
-# T4 skip reasons for the SBOM + second-opinion lanes (surfaced as skipped+reason).
+# T10 skip reason for the conftest policy gates (surfaced as skipped+reason).
+# Policy is advisory infrastructure: a missing binary never fails a scan,
+# the verdict just stays allow with empty denies/warns.
+CONFTEST_MISSING_REASON = "conftest not installed: policy gates skipped"
+
+# T10 redact patterns: secret-shaped tokens scrubbed from finding
+# messages/fix hints when redact=True (the normalizer already drops
+# Secret/Match values; this strips secret-adjacent context that leaks
+# through other lanes' free text).
+_REDACT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"sk-live-[A-Za-z0-9_\-]+"),
+    re.compile(r"gh[ops]_[A-Za-z0-9_\-]+"),
+    re.compile(r"glpat-[A-Za-z0-9_\-]+"),
+    re.compile(r"xox[bap]-[A-Za-z0-9_\-]+"),
+)
+_REDACT_KV_RE = re.compile(
+    r"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*['\"]?[\w\-.]{6,}['\"]?"
+)
 SYFT_MISSING_REASON = "syft not installed: SBOM store skipped"
 GRYPE_MISSING_REASON = "grype not installed: SBOM matcher skipped"
 GRYPE_NO_SBOM_REASON = "syft SBOM unavailable: no SBOM to match"
@@ -326,6 +345,7 @@ DIVE_DIFF_REASON = (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
+POLICY_DIR = REPO_ROOT / "policy"
 OXLINT_CONFIG = REPO_ROOT / ".oxlintrc.json"
 ESLINT_CONFIG = REPO_ROOT / "eslint.config.mjs"
 
@@ -537,9 +557,28 @@ def resolve_secrets_binary() -> str | None:
     return None
 
 
-def betterleaks_path_argv(target: str, binary: str = BETTERLEAKS_ENGINE) -> list[str]:
-    """Secrets scan of a repo checkout path (same pin, see above)."""
-    return [binary, "detect", "--no-git", "--source", target]
+def betterleaks_path_argv(
+    target: str,
+    binary: str = BETTERLEAKS_ENGINE,
+    baseline: str | None = None,
+    redact: bool = False,
+) -> list[str]:
+    """Secrets scan of a repo checkout path (same pin, see above).
+
+    ``baseline`` appends ``--baseline-path`` so the engine suppresses
+    known findings itself; ``redact`` appends ``--redact`` so secrets are
+    masked in engine output. Flag names follow gitleaks v8 ``detect --help``
+    (``-b/--baseline-path``, ``--redact``; verified live in the v8.28.0
+    release README text: baseline issues are ignored, redact masks stdout);
+    betterleaks is treated as gitleaks-compatible per tools-manifest.json,
+    so the same argv serves both engines. Defaults add no flags, keeping existing argv identical for the no-baseline/no-redact path.
+    """
+    argv = [binary, "detect", "--no-git", "--source", target]
+    if baseline:
+        argv += ["--baseline-path", baseline]
+    if redact:
+        argv += ["--redact"]
+    return argv
 
 
 def oxlint_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
@@ -2016,10 +2055,15 @@ async def _run_secrets_with_fallback(
     return "betterleaks", payload
 
 
-async def _run_betterleaks_path(target: str, timeout: float) -> tuple[str, Any]:
+async def _run_betterleaks_path(
+    target: str,
+    timeout: float,
+    baseline: str | None = None,
+    redact: bool = False,
+) -> tuple[str, Any]:
     return await _run_secrets_with_fallback(
-        betterleaks_path_argv(target),
-        betterleaks_path_argv(target, GITLEAKS_FALLBACK),
+        betterleaks_path_argv(target, baseline=baseline, redact=redact),
+        betterleaks_path_argv(target, GITLEAKS_FALLBACK, baseline, redact),
         input_data=None,
         timeout=timeout,
     )
@@ -2062,6 +2106,152 @@ async def _run_trufflehog(target: str, timeout: float) -> tuple[str, Any]:
         parse=_parse_trufflehog_stdout,
     )
     return "trufflehog", payload
+
+
+def conftest_argv(findings_file: str | Path) -> list[str]:
+    """Policy-gate argv over one findings file as JSON.
+
+    Documented-source flags: conftest is absent in this env, so re-verify
+    read-only via ``conftest test --help`` when present before changing
+    them -- ``conftest test --policy <policy-dir> --output json <file>``
+    per the v0.71.1 docs (policies default to a ``policy/`` dir, overridable
+    via ``--policy``; ``deny``/``warn`` rules are the documented gates and
+    ``package main`` needs no ``--namespace`` flag). Live re-verification
+    owed; the pin (v0.71.1) and release assets are verified live via the
+    release API (see tools-manifest.json provenance).
+    """
+    return [
+        CONFTEST_ENGINE,
+        "test",
+        "--policy",
+        str(POLICY_DIR),
+        "--output",
+        "json",
+        str(findings_file),
+    ]
+
+
+def parse_conftest_output(payload: Any) -> dict[str, Any]:
+    """Map ``conftest test --output json`` results to a policy verdict.
+
+    Real shape (documented source v0.71.1 -- binary absent, live run owed):
+    a list of ``{"filename", "namespace", "successes", "failures":
+    [{"msg"}], "warnings": [{"msg"}], "skipped"}``. Each failure msg
+    becomes a deny, each warning msg a warn; ``decision`` is ``block`` when
+    any deny exists, else ``allow``. Tolerant: string entries pass through,
+    dicts read ``msg``/``message``/``text`` in order, unknown shapes yield an
+    allow with empty lists (policy never invents a block).
+    """
+    denies: list[str] = []
+    warns: list[str] = []
+    items = payload if isinstance(payload, list) else []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        for raw in entry.get("failures", []) or []:
+            text = _conftest_msg(raw)
+            if text:
+                denies.append(text)
+        for raw in entry.get("warnings", []) or []:
+            text = _conftest_msg(raw)
+            if text:
+                warns.append(text)
+    return {
+        "decision": "block" if denies else "allow",
+        "denies": denies,
+        "warns": warns,
+    }
+
+
+def _conftest_msg(raw: Any) -> str:
+    """One conftest failure/warning entry to text (msg/message/text/str)."""
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, dict):
+        for key in ("msg", "message", "text"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+async def _run_conftest(findings_file: str, timeout: float) -> tuple[str, Any]:
+    """Policy-gate lane: missing binary degrades to not-installed."""
+    payload = await run_scanner_json(
+        conftest_argv(findings_file),
+        input_data=None,
+        timeout=timeout,
+    )
+    return "conftest", payload
+
+
+async def _evaluate_policy(
+    findings: Any, timeout: float
+) -> tuple[dict[str, Any], str | None]:
+    """Evaluate the Rego gates over ``findings``; return (verdict, skip_reason).
+
+    Writes ``{"findings": [...]}`` to a tmpfile (the input shape the
+    policy/ rules match on), runs :func:`_run_conftest`, parses via
+    :func:`parse_conftest_output`. A missing binary returns an allow
+    verdict plus :data:`CONFTEST_MISSING_REASON`; timeouts/failures also
+    degrade to allow with a reason -- policy is advisory and never fails
+    a scan. The tmpfile is read never (only the binary sees it), deleted
+    afterwards, never logged.
+    """
+    if shutil.which(CONFTEST_ENGINE) is None:
+        return {"decision": "allow", "denies": [], "warns": []}, CONFTEST_MISSING_REASON
+    with tempfile.NamedTemporaryFile(
+        prefix="bravoguard-policy-", suffix=".json", delete=False
+    ) as tmp:
+        report = tmp.name
+    try:
+        with contextlib.suppress(OSError):
+            Path(report).write_text(
+                json.dumps({"findings": findings if isinstance(findings, list) else []}),
+                encoding="utf-8",
+            )
+        try:
+            _, payload = await _run_conftest(report, timeout)
+        except ScannerMissingError:
+            return {"decision": "allow", "denies": [], "warns": []}, CONFTEST_MISSING_REASON
+        except ScannerTimeoutError:
+            return {"decision": "allow", "denies": [], "warns": []}, "conftest timeout"
+        except OrchestratorError:
+            return {"decision": "allow", "denies": [], "warns": []}, "conftest failed"
+        return parse_conftest_output(payload), None
+    finally:
+        with contextlib.suppress(OSError):
+            Path(report).unlink()
+
+
+def _redact_findings(findings: Any) -> Any:
+    """Scrub secret-shaped tokens from finding free text (redact=True).
+
+    Replaces provider-prefixed tokens (sk-live/gh../glpat/xox.) and
+    ``key = value``-shaped assignments in ``message``/``fix_hint`` with
+    ``[REDACTED]``. Paths/lines/severities are untouched; non-list input
+    passes through. Best-effort: unknown token shapes may survive, but the
+    secrets lane never emits raw values in the first place (normalizer
+    drops Secret/Match), so this only strips adjacent context.
+    """
+    if not isinstance(findings, list):
+        return findings
+    scrubbed = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            scrubbed.append(finding)
+            continue
+        cleaned = dict(finding)
+        for key in ("message", "fix_hint"):
+            text = cleaned.get(key)
+            if not isinstance(text, str) or not text:
+                continue
+            for pattern in _REDACT_PATTERNS:
+                text = pattern.sub("[REDACTED]", text)
+            text = _REDACT_KV_RE.sub(r"\1=[REDACTED]", text)
+            cleaned[key] = text
+        scrubbed.append(cleaned)
+    return scrubbed
 
 
 # scan_repo lanes gated by detect_languages (T1). Secrets, trivy, and
@@ -2318,6 +2508,10 @@ def _lookup_scan_cache(cache: FindingCache | None, key: str) -> dict[str, Any] |
         # entries, which predate the image lanes).
         if cached.get("recommendations") is not None:
             response["recommendations"] = cached["recommendations"]
+        # T10: policy verdicts ride the same envelope (absent on legacy
+        # entries, which predate the conftest gates).
+        if cached.get("policy_verdict") is not None:
+            response["policy_verdict"] = cached["policy_verdict"]
         return response
     return {"status": "ok", "findings": cached, "cached": True}  # legacy list payload
 
@@ -2343,6 +2537,7 @@ def _store_scan_cache(
     languages: dict[str, Any] | None = None,
     skipped: dict[str, str] | None = None,
     recommendations: list[dict[str, Any]] | None = None,
+    policy_verdict: dict[str, Any] | None = None,
 ) -> None:
     if cache is None or not isinstance(findings, list):
         return
@@ -2358,6 +2553,11 @@ def _store_scan_cache(
         # diff hits never gain the key and the response shape is stable).
         if recommendations is not None:
             payload["recommendations"] = recommendations
+        # T10: policy verdicts ride the envelope only when evaluated (both
+        # entry points evaluate, so fresh entries always carry them; legacy
+        # entries without the key keep the old shape).
+        if policy_verdict is not None:
+            payload["policy_verdict"] = policy_verdict
         cache.put(
             key,
             payload,
@@ -2423,6 +2623,8 @@ async def scan_diff(
     cache: FindingCache | None = None,
     cache_ttl: float | None = None,
     exclude: list[str] | tuple[str, ...] | None = None,
+    baseline: str | None = None,
+    redact: bool = False,
 ) -> dict[str, Any]:
     """Scan added lines of a unified diff with SAST + bandit + secrets.
 
@@ -2456,6 +2658,14 @@ async def scan_diff(
     preserved by the materializer; missing binary reports skipped+reason);
     kics + dockle + dive always report skipped+reason here (kics needs
     whole-file context, image lanes need scan_repo + container_image).
+    ``baseline`` (path to a baseline file) and ``redact`` pass through to
+    the secrets lane (``--baseline-path``/``--redact``); ``redact``
+    additionally strips secret-adjacent context from finding messages.
+    The conftest policy gates evaluate here too (one cheap spawn over the
+    collected findings -- diff corpora are small, so the cost matches the
+    other diff lanes); a missing binary reports skipped+reason and the
+    verdict stays allow. The verdict rides ``policy_verdict`` and never
+    fails the scan.
     """
     if not diff or not diff.strip():
         return {"status": "empty-diff", "findings": []}
@@ -2463,7 +2673,8 @@ async def scan_diff(
     excludes = _normalize_excludes(exclude)
     if cache is not None:
         key = make_scan_key(
-            f"{diff}\x00exclude:{','.join(sorted(excludes))}",
+            f"{diff}\x00exclude:{','.join(sorted(excludes))}"
+            f"\x00baseline:{baseline or ''}\x00redact:{bool(redact)}",
             scanner_versions=scanner_fingerprint(),
         )
         hit = _lookup_scan_cache(cache, key)
@@ -2517,7 +2728,7 @@ async def scan_diff(
         # Single path-mode for both engines: files already exist, so the
         # workdir scan adds zero IO; gitleaks v8 rejects `--source -` (stdin FTL).
         secrets_job = (
-            _run_betterleaks_path(str(workdir), budget)
+            _run_betterleaks_path(str(workdir), budget, baseline, redact)
             if files
             else _empty_secrets_result()
         )
@@ -2565,6 +2776,12 @@ async def scan_diff(
         # order; best-effort, and the write-through below caches enriched
         # findings.
         result["findings"] = _apply_enrichment(result.get("findings", []), cache)
+        if redact:
+            result["findings"] = _redact_findings(result.get("findings", []))
+        verdict, policy_skip = await _evaluate_policy(result.get("findings", []), budget)
+        result["policy_verdict"] = verdict
+        if policy_skip is not None:
+            skipped["conftest"] = policy_skip
         result["languages"] = detection
         if skipped:
             result["skipped"] = skipped
@@ -2579,6 +2796,7 @@ async def scan_diff(
             result.get("errors"),
             languages=detection,
             skipped=skipped or None,
+            policy_verdict=result.get("policy_verdict"),
         )
     return result
 
@@ -2593,6 +2811,8 @@ async def scan_repo(
     exclude: list[str] | tuple[str, ...] | None = None,
     verify_secrets: bool = False,
     container_image: str | None = None,
+    baseline: str | None = None,
+    redact: bool = False,
 ) -> dict[str, Any]:
     """Deep-scan a repo checkout: validate the path, fan out, collect.
 
@@ -2648,7 +2868,14 @@ async def scan_repo(
     images are NEVER auto-built): dockle CIS findings join ``findings``
     while dive efficiency lands in a NEW top-level ``recommendations[]``
     section (``source/rule_id/message/image`` dicts — efficiency is not a
-    vulnerability, so it never enters ``findings``).
+    vulnerability, so it never enters ``findings``). ``baseline`` (path to
+    a baseline file) and ``redact`` pass through to the secrets lane
+    (``--baseline-path``/``--redact``); ``redact`` additionally strips
+    secret-adjacent context from finding messages. The conftest policy gates
+    evaluate over the collected findings (same cheap post-phase as
+    ``scan_diff``); a missing binary reports skipped+reason and the verdict
+    stays allow. The verdict rides ``policy_verdict`` and never fails the
+    scan.
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -2666,7 +2893,8 @@ async def scan_repo(
             f"repo:{target}|{_dir_fingerprint(target, excludes)}"
             f"\x00exclude:{','.join(sorted(excludes))}"
             f"\x00verify:{bool(verify_secrets)}"
-            f"\x00image:{container_image or ''}",
+            f"\x00image:{container_image or ''}"
+            f"\x00baseline:{baseline or ''}\x00redact:{bool(redact)}",
             scanner_versions=scanner_fingerprint(),
         )
         hit = _lookup_scan_cache(cache, key)
@@ -2702,7 +2930,7 @@ async def scan_repo(
         staging = Path(stage_tmp)
         staged = _stage_filtered_tree(target, excludes, staging)
         secrets_job = (
-            _run_betterleaks_path(str(staging), budget)
+            _run_betterleaks_path(str(staging), budget, baseline, redact)
             if staged
             else _empty_secrets_result()
         )
@@ -2846,6 +3074,16 @@ async def scan_repo(
         # scores drive the KEV-first/EPSS-desc order; best-effort, and the
         # write-through below caches enriched findings.
         result["findings"] = _apply_enrichment(result.get("findings", []), cache)
+        if redact:
+            result["findings"] = _redact_findings(result.get("findings", []))
+        # T10 policy gates (same cheap post-phase as scan_diff): verdict
+        # rides policy_verdict, missing binary reports skipped+reason.
+        verdict, policy_skip = await _evaluate_policy(
+            result.get("findings", []), budget
+        )
+        result["policy_verdict"] = verdict
+        if policy_skip is not None:
+            skipped["conftest"] = policy_skip
         # T8 dive phase: efficiency recommendations (sequential post phase
         # like grype — recommendations[] is NOT findings, so it bypasses
         # _collect and lands in its own top-level contract section).
@@ -2881,6 +3119,7 @@ async def scan_repo(
             languages=detection,
             skipped=skipped or None,
             recommendations=result.get("recommendations"),
+            policy_verdict=result.get("policy_verdict"),
         )
     return result
 

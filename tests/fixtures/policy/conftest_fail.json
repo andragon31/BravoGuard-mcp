@@ -1,0 +1,1 @@
+[{"filename": "findings.json", "namespace": "main", "successes": 1, "skipped": [], "warnings": [{"msg": "HIGH without fix: hadolint-DL3002 at Dockerfile:1"}], "failures": [{"msg": "CRITICAL finding: trufflehog-Github at config/settings.py:12"}]}]

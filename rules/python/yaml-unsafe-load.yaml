@@ -1,0 +1,10 @@
+rules:
+  - id: bravoguard-python-yaml-unsafe-load
+    languages: [python]
+    severity: ERROR
+    message: Avoid yaml.load without SafeLoader (CWE-502). It can construct arbitrary Python objects from untrusted input.
+    metadata:
+      cwe: "CWE-502"
+      owasp_2025: A08
+      fix_hint: "Use yaml.safe_load(data) or yaml.load(data, Loader=yaml.SafeLoader)."
+    pattern: yaml.load($DATA)

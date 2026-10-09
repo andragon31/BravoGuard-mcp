@@ -1,0 +1,17 @@
+rules:
+  - id: bravoguard-python-weak-random
+    languages: [python]
+    severity: ERROR
+    message: Avoid random.* for security tokens (CWE-330). The random module is predictable; use secrets instead.
+    metadata:
+      cwe: "CWE-330"
+      owasp_2025: A04
+      fix_hint: "Use secrets.token_urlsafe(32) for tokens or secrets.randbelow(n) for ranges."
+    patterns:
+      - pattern-either:
+          - pattern: random.random(...)
+          - pattern: random.randrange(...)
+          - pattern: random.randint(...)
+          - pattern: random.choice(...)
+          - pattern: random.choices(...)
+          - pattern: random.uniform(...)

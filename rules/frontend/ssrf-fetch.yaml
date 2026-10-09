@@ -1,0 +1,13 @@
+rules:
+  - id: bravoguard-frontend-ssrf-fetch
+    languages: [javascript, typescript]
+    severity: ERROR
+    message: Avoid fetch with a concatenated-variable URL (CWE-918). An attacker-controlled host becomes server-side request forgery.
+    metadata:
+      cwe: "CWE-918"
+      owasp_2025: A01
+      fix_hint: "Validate the URL against an explicit allowlist of hosts and https scheme before fetch."
+    patterns:
+      - pattern-either:
+          - pattern: fetch($A + $B)
+          - pattern: fetch($A + $B, $C)
