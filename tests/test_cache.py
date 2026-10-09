@@ -159,7 +159,10 @@ def test_scan_diff_write_through_then_hit_avoids_subprocess(
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", _forbidden)
         second = asyncio.run(orchestrator.scan_diff(SEED_DIFF, cache=cache))
-        assert second == {"status": "ok", "findings": first["findings"], "cached": True}
+        assert second["status"] == "ok"
+        assert second["findings"] == first["findings"]
+        assert second["cached"] is True
+        assert second["languages"] == first["languages"]
     finally:
         cache.close()
 

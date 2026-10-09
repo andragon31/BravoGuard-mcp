@@ -112,6 +112,7 @@ from pathlib import Path
 from typing import Any
 
 from bravoguard.cache import FindingCache, make_osv_key, make_scan_key, scanner_fingerprint
+from bravoguard.languages import JS_SUFFIXES, PYTHON_SUFFIXES, detect_languages, lanes_for
 from bravoguard.normalizer import (
     FINDING_KEYS,
     normalize_bandit,
@@ -622,6 +623,27 @@ def materialize_diff_files(
     return written
 
 
+def _sast_targets_by_language(files: list[Path]) -> dict[str, list[Path]]:
+    """Partition materialized diff files by suffix group for lane routing.
+
+    T2 HOOK (semgrep rule split): T2 replaces the joint ``_scan_sast`` call
+    with per-language calls carrying dedicated rule dirs (``rules/python``
+    for ``"python"``, ``rules/frontend`` for ``"javascript"``); ``"other"``
+    files keep riding the joint call. T1 uses only the ``"python"`` group
+    (bandit gating) and scans all groups jointly, so findings are unchanged.
+    """
+    grouped: dict[str, list[Path]] = {"python": [], "javascript": [], "other": []}
+    for path in files:
+        suffix = path.suffix.lower()
+        if suffix in PYTHON_SUFFIXES:
+            grouped["python"].append(path)
+        elif suffix in JS_SUFFIXES:
+            grouped["javascript"].append(path)
+        else:
+            grouped["other"].append(path)
+    return grouped
+
+
 async def _scan_sast(
     target: str | Path | list[str | Path] | tuple[str | Path, ...],
     timeout: float,
@@ -883,6 +905,12 @@ async def _run_betterleaks_path(target: str, timeout: float) -> tuple[str, Any]:
     )
 
 
+# scan_repo lanes gated by detect_languages (T1). Secrets, trivy, and
+# checkov are language-agnostic and always run; future manifest-gated
+# lanes (deptry, knip, npm audit, ...) join via LANE_GATES (T2+).
+_REPO_GATED_LANES: tuple[str, ...] = ("sast", "bandit", "oxlint", "supply")
+
+
 _NORMALIZERS = {
     "sast": normalize_semgrep,
     "bandit": normalize_bandit,
@@ -1067,7 +1095,7 @@ def _lookup_scan_cache(cache: FindingCache | None, key: str) -> dict[str, Any] |
         return None
     if cached is None:
         return None
-    if isinstance(cached, dict):  # envelope: findings + errors
+    if isinstance(cached, dict):  # envelope: findings + errors + languages + skipped
         response: dict[str, Any] = {
             "status": "ok",
             "findings": cached.get("findings", []),
@@ -1075,6 +1103,10 @@ def _lookup_scan_cache(cache: FindingCache | None, key: str) -> dict[str, Any] |
         }
         if cached.get("errors"):
             response["errors"] = cached["errors"]
+        if cached.get("languages") is not None:
+            response["languages"] = cached["languages"]
+        if cached.get("skipped"):
+            response["skipped"] = cached["skipped"]
         return response
     return {"status": "ok", "findings": cached, "cached": True}  # legacy list payload
 
@@ -1097,11 +1129,22 @@ def _store_scan_cache(
     findings: Any,
     cache_ttl: float | None,
     errors: dict[str, str] | None = None,
+    languages: dict[str, Any] | None = None,
+    skipped: dict[str, str] | None = None,
 ) -> None:
     if cache is None or not isinstance(findings, list):
         return
     with contextlib.suppress(Exception):
-        cache.put(key, {"findings": findings, "errors": errors or {}}, ttl_seconds=cache_ttl)
+        cache.put(
+            key,
+            {
+                "findings": findings,
+                "errors": errors or {},
+                "languages": languages or {},
+                "skipped": skipped or {},
+            },
+            ttl_seconds=cache_ttl,
+        )
 
 
 async def _collect(jobs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1144,7 +1187,11 @@ async def scan_diff(
     (skipped entirely when no files survive the filter). The diff is materialized under
     :func:`materialize_base` (repo-local ``.bravoguard/tmp/`` when writable,
     system temp otherwise); the tree is always removed afterwards, even on
-    scanner error or timeout, so finding content never lingers.
+    scanner error or timeout, so finding content never lingers. The result
+    carries ``languages`` (detect_languages over the materialized files);
+    when no python files are in the diff, bandit is skipped with reason
+    "no python files in diff". Semgrep keeps the joint call over both
+    language groups (per-language rule dirs are the T2 hook).
     """
     if not diff or not diff.strip():
         return {"status": "empty-diff", "findings": []}
@@ -1162,6 +1209,13 @@ async def scan_diff(
     workdir = Path(tempfile.mkdtemp(prefix="bravoguard-diff-", dir=str(materialize_base())))
     try:
         files = materialize_diff_files(diff, workdir, excludes)
+        # T1 routing: the workdir corpus carries diff suffixes (never
+        # markers), so this detection is census-only.
+        detection = detect_languages(workdir)
+        py_files = _sast_targets_by_language(files)["python"]
+        skipped: dict[str, str] = {}
+        if not py_files:
+            skipped["bandit"] = "no python files in diff"
         # Single path-mode for both engines: files already exist, so the
         # workdir scan adds zero IO; gitleaks v8 rejects `--source -` (stdin FTL).
         secrets_job = (
@@ -1173,14 +1227,26 @@ async def scan_diff(
         # Bandit ignores gitignore so it keeps the workdir; repo scans keep dir targets.
         jobs = [
             ("sast", _scan_sast(files, budget, excludes)),
-            ("bandit", _run_bandit(str(workdir), budget, excludes)),
             ("betterleaks", secrets_job),
         ]
+        if py_files:
+            jobs.insert(1, ("bandit", _run_bandit(str(workdir), budget, excludes)))
         result = await _collect(jobs)
+        result["languages"] = detection
+        if skipped:
+            result["skipped"] = skipped
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     if not _is_fully_degraded(result, len(jobs)):
-        _store_scan_cache(cache, key, result.get("findings"), cache_ttl, result.get("errors"))
+        _store_scan_cache(
+            cache,
+            key,
+            result.get("findings"),
+            cache_ttl,
+            result.get("errors"),
+            languages=detection,
+            skipped=skipped or None,
+        )
     return result
 
 
@@ -1205,9 +1271,11 @@ async def scan_repo(
     remapped back; the lane is skipped when the mirror is empty),
     oxlint via native ``--ignore-pattern``, trivy via native
     ``--skip-dirs``/``--skip-files``, and checkov via native
-    ``--skip-path`` regexes. Lanes with no applicable files (no JS for
-    oxlint, no manifests/IaC for trivy/checkov) return ``ok`` with empty
-    findings, not errors. The supply lane (pure-Python typosquat +
+    ``--skip-path`` regexes. T1 routes the gated lanes (``_REPO_GATED_LANES``)
+    by one :func:`bravoguard.languages.detect_languages` call: non-applicable
+    lanes are skipped with status ``skipped`` + machine-readable reason
+    (never silent, never an error), and the result carries ``languages``.
+    The supply lane (pure-Python typosquat +
     bundled-binary checks) runs in-process and never errors; its walk honors
     ``exclude`` except bare binary-extension globs (``*.exe`` etc.), which
     are lifted for that lane only — they exist to keep engines off binaries,
@@ -1233,6 +1301,12 @@ async def scan_repo(
         hit = _lookup_scan_cache(cache, key)
         if hit is not None:
             return hit
+    # One detection drives every gated lane; the gated subset is fixed here
+    # while future lanes join via LANE_GATES (T2+ extension point).
+    detection = detect_languages(target)
+    skipped = {
+        lane: reason for lane, reason in lanes_for(detection).items() if lane in _REPO_GATED_LANES
+    }
     with tempfile.TemporaryDirectory(prefix="bravoguard-secrets-") as stage_tmp:
         staging = Path(stage_tmp)
         staged = _stage_filtered_tree(target, excludes, staging)
@@ -1241,15 +1315,18 @@ async def scan_repo(
             if staged
             else _empty_secrets_result()
         )
-        jobs = [
-            ("sast", _scan_sast_repo_files(target, budget, excludes)),
-            ("bandit", _run_bandit(str(target), budget, excludes)),
-            ("betterleaks", secrets_job),
-            ("oxlint", _run_oxlint(str(target), budget, excludes)),
-            ("trivy", _run_trivy(str(target), budget, excludes)),
-            ("checkov", _run_checkov(str(target), budget, excludes)),
-            ("supply", _run_supply(target, excludes)),
-        ]
+        jobs: list[tuple[str, Any]] = []
+        if "sast" not in skipped:
+            jobs.append(("sast", _scan_sast_repo_files(target, budget, excludes)))
+        if "bandit" not in skipped:
+            jobs.append(("bandit", _run_bandit(str(target), budget, excludes)))
+        jobs.append(("betterleaks", secrets_job))
+        if "oxlint" not in skipped:
+            jobs.append(("oxlint", _run_oxlint(str(target), budget, excludes)))
+        jobs.append(("trivy", _run_trivy(str(target), budget, excludes)))
+        jobs.append(("checkov", _run_checkov(str(target), budget, excludes)))
+        if "supply" not in skipped:
+            jobs.append(("supply", _run_supply(target, excludes)))
         result = await _collect(jobs)
         if staged:
             for finding in result.get("findings", []):
@@ -1257,8 +1334,19 @@ async def scan_repo(
                     finding["path"] = _remap_staged_path(
                         str(finding["path"]), staging, target
                     )
+        result["languages"] = detection
+        if skipped:
+            result["skipped"] = skipped
     if not _is_fully_degraded(result, len(jobs)):
-        _store_scan_cache(cache, key, result.get("findings"), cache_ttl, result.get("errors"))
+        _store_scan_cache(
+            cache,
+            key,
+            result.get("findings"),
+            cache_ttl,
+            result.get("errors"),
+            languages=detection,
+            skipped=skipped or None,
+        )
     return result
 
 

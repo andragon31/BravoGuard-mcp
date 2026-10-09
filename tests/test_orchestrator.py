@@ -218,10 +218,12 @@ def test_scan_repo_rejects_traversal(tmp_path: Path) -> None:
 def test_scan_repo_accepts_valid_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
     calls: list = []
     install_fake(monkeypatch, quiet_responses(), calls)
     result = asyncio.run(orchestrator.scan_repo(str(tmp_path)))
-    assert result == {"status": "ok", "findings": []}
+    assert result["status"] == "ok"
+    assert result["findings"] == []
     bandit_argv = next(argv for argv, _ in calls if Path(argv[0]).name == "bandit")
     assert str(tmp_path) in bandit_argv
 

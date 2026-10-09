@@ -299,6 +299,8 @@ def test_scan_repo_runs_three_new_lanes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    # oxlint is suffix-gated: it only runs when JS is detected (T1 routing).
+    (tmp_path / "app.js").write_text("const x = 1;\n", encoding="utf-8")
     calls: list = []
     install_lane_fake(monkeypatch, calls)
     result = asyncio.run(orchestrator.scan_repo(str(tmp_path)))
@@ -328,7 +330,7 @@ def test_scan_repo_new_lanes_empty_when_not_applicable(
     async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
         names = {Path(str(a)).name for a in argv} | set(argv)
         if "oxlint" in names:
-            return FakeProcess(b'{"diagnostics": []}', 0)
+            raise AssertionError("oxlint must be skipped on a py-only dir, not invoked")
         if "trivy" in names:
             return FakeProcess(b"{}", 0)
         if "checkov" in names:
@@ -341,13 +343,19 @@ def test_scan_repo_new_lanes_empty_when_not_applicable(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
     result = asyncio.run(orchestrator.scan_repo(str(tmp_path)))
-    assert result == {"status": "ok", "findings": []}
+    assert result["status"] == "ok"
+    assert result["findings"] == []
+    # T1 routing: py-only dir skips oxlint (no JS) and supply (no manifests).
+    assert result["skipped"]["oxlint"] == "no javascript files or markers detected"
+    assert result["skipped"]["supply"] == "no python manifests detected"
 
 
 def test_scan_repo_new_lanes_missing_degrades_to_not_installed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    # JS present so the missing oxlint binary is attempted (not skipped).
+    (tmp_path / "app.js").write_text("const x = 1;\n", encoding="utf-8")
     calls: list = []
     install_lane_fake(monkeypatch, calls, missing={"oxlint", "trivy", "checkov"})
     result = asyncio.run(orchestrator.scan_repo(str(tmp_path)))
@@ -371,6 +379,8 @@ def test_scan_repo_oxlint_no_files_returns_ok_empty(
 ) -> None:
     """oxlint rc=1 with preamble + empty envelope is ok/empty, not failed."""
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    # JS present so oxlint actually runs (py-only would skip it via T1 routing).
+    (tmp_path / "app.js").write_text("const x = 1;\n", encoding="utf-8")
 
     async def fake_create(*argv: str, **kwargs: object) -> FakeProcess:
         names = {Path(str(a)).name for a in argv} | set(argv)
@@ -388,7 +398,10 @@ def test_scan_repo_oxlint_no_files_returns_ok_empty(
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
     result = asyncio.run(orchestrator.scan_repo(str(tmp_path)))
-    assert result == {"status": "ok", "findings": []}
+    assert result["status"] == "ok"
+    assert result["findings"] == []
+    # JS present: oxlint really ran (not skipped) and its rc=1 preamble is ok.
+    assert "oxlint" not in result.get("skipped", {})
 
 
 def test_oxlint_garbage_stdout_still_fails(monkeypatch: pytest.MonkeyPatch) -> None:

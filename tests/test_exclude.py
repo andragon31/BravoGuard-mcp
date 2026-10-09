@@ -302,7 +302,9 @@ def test_scan_diff_empty_after_filter_ok(monkeypatch: pytest.MonkeyPatch) -> Non
     result = asyncio.run(orchestrator.scan_diff(VENV_ONLY_DIFF, exclude=["*/.venv/*"]))
     assert result["status"] == "ok"
     assert result["findings"] == []
-    assert {Path(argv[0]).name for argv in calls} == {"bandit"}
+    # T1 routing: fully-filtered diff spawns zero binaries (bandit skipped).
+    assert calls == []
+    assert result["skipped"] == {"bandit": "no python files in diff"}
 
 
 def _spy_staging(monkeypatch: pytest.MonkeyPatch, seen: dict) -> None:
