@@ -12,6 +12,13 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   per-file by suffix (bandit suffix-gated) and `scan_repo` by detected stack (sast/bandit/oxlint/
   supply gated); non-applicable lanes report `skipped` + machine-readable `reason`; both tools
   return `languages{}`. Findings-identical on mixed fixtures (regression-tested). 27 new tests.
+- T2 free config (`feature/bravoguard-py-js-containers`, `.oxlintrc.json` +
+  `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` + `tests/test_config.py`):
+  oxlint `suspicious=warn` via repo-root `.oxlintrc.json` (explicit `--config`: discovery is
+  CWD-relative, verified via `--help` + live 1.65.0 proof); trivy `--scanners vuln,misconfig,license`
+  (`secret` stays excluded) with license findings (LOW); semgrep/opengrep per-language `--config`
+  split (python: rules/python + rules/supply-chain, javascript: rules/frontend) via shared
+  `_scan_sast_by_language`. Findings-identical post-split. 16 new tests.
 - H1 supply-plus (`feature/bravoguard-supply-plus`, `src/bravoguard/supply.py` +
   `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` +
   `src/bravoguard/suggest.py` + `tests/test_supply_plus.py`): Windows

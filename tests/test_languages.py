@@ -505,9 +505,19 @@ def test_scan_diff_mixed_bandit_runs_semgrep_covers_both(
     assert result["languages"]["languages"] == ["python", "javascript"]
     assert "skipped" not in result
     assert "bandit" in spawned_binaries(calls)
-    semgrep_argv = next(a for a in calls if Path(str(a[0])).name == "semgrep")
-    scanned = [Path(str(a)).name for a in semgrep_argv if str(a).endswith((".py", ".js"))]
-    assert scanned == ["app.py", "app.js"]
+    semgrep_argvs = [a for a in calls if Path(str(a[0])).name == "semgrep"]
+    # T2 split: one invocation per language group (python: rules/python, js: rules/frontend).
+    scanned = sorted(
+        Path(str(a)).name
+        for argv in semgrep_argvs
+        for a in argv
+        if str(a).endswith((".py", ".js"))
+    )
+    assert scanned == ["app.js", "app.py"]
+    py_argv = next(a for a in semgrep_argvs if any(str(x).endswith("rules/python") for x in a))
+    assert any(Path(str(x)).name == "app.py" for x in py_argv)
+    js_argv = next(a for a in semgrep_argvs if any(str(x).endswith("rules/frontend") for x in a))
+    assert any(Path(str(x)).name == "app.js" for x in js_argv)
     rule_ids = {f["rule_id"] for f in result["findings"]}
     assert {"bravoguard-python-pickle-load", "B301"} <= rule_ids
 

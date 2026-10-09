@@ -2,16 +2,20 @@
 
 Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
 
-- SAST: ``semgrep --config rules/ --json`` with ``opengrep`` fallback (same args).
+- SAST: ``semgrep`` with per-language rule dirs (python: ``--config rules/python``
+  + ``--config rules/supply-chain``; javascript: ``--config rules/frontend``) as JSON,
+  with ``opengrep`` fallback (same args). Groups with no files are never invoked.
 - Python: ``bandit -f json`` over the scan target.
 - Secrets: ``betterleaks detect`` over a materialized dir (``scan_diff``
   scans its workdir, ``scan_repo`` a filtered mirror) with a ``gitleaks``
   v8 fallback when betterleaks is missing. The fallback adds
   ``--report-path`` capture (this gitleaks build prints only logs to
   stdout); the tmpfile is read once, deleted, and never logged.
-- Frontend: ``oxlint <target> --format json`` (M1).
-- Container/IaC: ``trivy fs --format json --scanners vuln,misconfig``
-  (M1; the ``secret`` scanner is excluded on purpose — betterleaks owns
+- Frontend: ``oxlint --config .oxlintrc.json <target> --format json`` (M1 + T2
+  suspicious category via repo-root config; explicit ``--config`` because default
+  discovery is CWD-relative and misses arbitrary targets).
+- Container/IaC/license: ``trivy fs --format json --scanners vuln,misconfig,license``
+  (M1 + T2 license; the ``secret`` scanner stays excluded on purpose — betterleaks owns
   secrets, so enabling it would duplicate findings and double-handle live
   secrets).
 - IaC: ``uv tool run --from checkov checkov -d <target> -o json`` (M1; the
@@ -139,6 +143,7 @@ CHECKOV_ENGINE = "checkov"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
+OXLINT_CONFIG = REPO_ROOT / ".oxlintrc.json"
 
 # SAST candidate extensions (scan_repo file-list lane): rules/python targets
 # python (.py/.pyi), rules/frontend targets javascript+typescript
@@ -242,15 +247,24 @@ class _SastPartialTimeout(ScannerTimeoutError):
 def semgrep_argv(
     target: str | Path | list[str | Path] | tuple[str | Path, ...],
     exclude: list[str] | tuple[str, ...] | None = None,
+    config_dirs: list[str | Path] | tuple[str | Path, ...] | None = None,
 ) -> list[str]:
-    """Primary SAST engine: semgrep with the portable rules/ config as JSON.
+    """Primary SAST engine: semgrep with portable rule dirs as JSON.
 
     ``exclude`` patterns become repeatable ``--exclude=PATTERN`` flags
     (``None`` adds no flags; callers pass normalized excludes explicitly).
+    ``config_dirs`` is one or more ``--config`` dirs (``--config`` is
+    repeatable; default is the joint ``rules/`` pack). T2 split: python
+    groups pass ``rules/python`` + ``rules/supply-chain``, javascript
+    groups pass ``rules/frontend`` (see :func:`_sast_rule_dirs`).
     ``target`` is one dir/file or an explicit file list (scan_diff passes
     materialized files so gitignored trees are not skipped).
     """
-    argv = [SEMGREP_ENGINE, "--config", str(RULES_DIR), "--json", "--quiet"]
+    configs = tuple(config_dirs) if config_dirs is not None else (RULES_DIR,)
+    argv = [SEMGREP_ENGINE]
+    for config in configs:
+        argv += ["--config", str(config)]
+    argv += ["--json", "--quiet"]
     argv.extend(f"--exclude={pattern}" for pattern in dict.fromkeys(exclude or ()))
     if isinstance(target, (list, tuple)):
         argv.extend(str(item) for item in target)
@@ -262,9 +276,14 @@ def semgrep_argv(
 def opengrep_argv(
     target: str | Path | list[str | Path] | tuple[str | Path, ...],
     exclude: list[str] | tuple[str, ...] | None = None,
+    config_dirs: list[str | Path] | tuple[str | Path, ...] | None = None,
 ) -> list[str]:
     """Drop-in fallback: identical args run on the opengrep engine."""
-    argv = [OPENGREP_FALLBACK, "--config", str(RULES_DIR), "--json", "--quiet"]
+    configs = tuple(config_dirs) if config_dirs is not None else (RULES_DIR,)
+    argv = [OPENGREP_FALLBACK]
+    for config in configs:
+        argv += ["--config", str(config)]
+    argv += ["--json", "--quiet"]
     argv.extend(f"--exclude={pattern}" for pattern in dict.fromkeys(exclude or ()))
     if isinstance(target, (list, tuple)):
         argv.extend(str(item) for item in target)
@@ -329,12 +348,18 @@ def oxlint_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None)
     """Frontend lint as JSON (``-f/--format`` verified in oxlint 1.65.0 ``--help``).
 
     ``exclude`` patterns become repeatable ``--ignore-pattern=PAT`` flags
-    (``None`` adds no flags). On win32 the lane must run through
+    (``None`` adds no flags). ``--config`` points at the repo-root
+    ``.oxlintrc.json`` explicitly: the default discovery (``./.oxlintrc.json``
+    per ``oxlint --help``) is CWD-relative, so scans of arbitrary targets
+    would silently miss the suspicious category without it (verified live
+    with oxlint 1.65.0: CWD config does not apply to targets elsewhere,
+    explicit ``-c`` raises the rule count 95 -> 122 and surfaces
+    ``eslint(no-new)``). On win32 the lane must run through
     ``cmd /c`` because oxlint ships as a ``.ps1`` shim that
     ``create_subprocess_exec`` cannot spawn directly; POSIX uses the bare
     binary. Flags are identical on both platforms.
     """
-    argv = [OXLINT_ENGINE, "--format", "json"]
+    argv = [OXLINT_ENGINE, "--config", str(OXLINT_CONFIG), "--format", "json"]
     argv.extend(f"--ignore-pattern={pattern}" for pattern in dict.fromkeys(exclude or ()))
     argv.append(target)
     if sys.platform == "win32":
@@ -366,14 +391,15 @@ def _trivy_skip_args(patterns: tuple[str, ...]) -> list[str]:
 
 
 def trivy_argv(target: str, exclude: list[str] | tuple[str, ...] | None = None) -> list[str]:
-    """Container/IaC scan as JSON over a filesystem target.
+    """Container/IaC/license scan as JSON over a filesystem target.
 
-    ``--scanners vuln,misconfig`` (verified in ``trivy filesystem --help``;
+    ``--scanners vuln,misconfig,license`` (verified in ``trivy filesystem --help``;
     allowed values ``vuln,misconfig,secret,license``). The ``secret``
-    scanner is deliberately excluded — betterleaks owns secrets. Direct
+    scanner stays excluded — betterleaks owns secrets, so enabling it
+    would duplicate findings and double-handle live secrets. Direct
     argv on both platforms (trivy is a real ``.exe`` on Windows).
     """
-    argv = [TRIVY_ENGINE, "fs", "--format", "json", "--scanners", "vuln,misconfig"]
+    argv = [TRIVY_ENGINE, "fs", "--format", "json", "--scanners", "vuln,misconfig,license"]
     argv.extend(_trivy_skip_args(tuple(exclude or ())))
     argv.append(target)
     return argv
@@ -624,13 +650,13 @@ def materialize_diff_files(
 
 
 def _sast_targets_by_language(files: list[Path]) -> dict[str, list[Path]]:
-    """Partition materialized diff files by suffix group for lane routing.
+    """Partition SAST files by suffix group for lane routing.
 
-    T2 HOOK (semgrep rule split): T2 replaces the joint ``_scan_sast`` call
-    with per-language calls carrying dedicated rule dirs (``rules/python``
-    for ``"python"``, ``rules/frontend`` for ``"javascript"``); ``"other"``
-    files keep riding the joint call. T1 uses only the ``"python"`` group
-    (bandit gating) and scans all groups jointly, so findings are unchanged.
+    T2 split (implemented): per-language groups carry dedicated rule dirs
+    via :func:`_sast_rule_dirs` — ``"python"`` scans with ``rules/python``
+    + ``rules/supply-chain``, ``"javascript"`` with ``rules/frontend``;
+    ``"other"`` files keep riding the joint ``rules/`` call. Groups with
+    no files are never invoked (see :func:`_scan_sast_by_language`).
     """
     grouped: dict[str, list[Path]] = {"python": [], "javascript": [], "other": []}
     for path in files:
@@ -648,20 +674,79 @@ async def _scan_sast(
     target: str | Path | list[str | Path] | tuple[str | Path, ...],
     timeout: float,
     exclude: tuple[str, ...] = (),
+    config_dirs: list[str | Path] | tuple[str | Path, ...] | None = None,
 ) -> tuple[str, Any]:
     """Run semgrep, falling back to opengrep with identical args."""
     if isinstance(target, (list, tuple)) and not target:
         return SEMGREP_ENGINE, {"results": []}
     try:
         payload = await run_scanner_json(
-            semgrep_argv(target, exclude), input_data=None, timeout=timeout
+            semgrep_argv(target, exclude, config_dirs), input_data=None, timeout=timeout
         )
         return SEMGREP_ENGINE, payload
     except ScannerMissingError:
         payload = await run_scanner_json(
-            opengrep_argv(target, exclude), input_data=None, timeout=timeout
+            opengrep_argv(target, exclude, config_dirs), input_data=None, timeout=timeout
         )
         return OPENGREP_FALLBACK, payload
+
+
+def _sast_rule_dirs(group: str) -> tuple[Path, ...]:
+    """Rule dirs for one :func:`_sast_targets_by_language` group (single branch point).
+
+    ``"python"`` scans with ``rules/python`` + ``rules/supply-chain``
+    (``--config`` is repeatable), ``"javascript"`` with ``rules/frontend``,
+    anything else (``"other"``) with the joint ``rules/`` pack. Both
+    ``scan_diff`` and ``scan_repo`` route through here via
+    :func:`_scan_sast_by_language`, so group-to-config branching exists once.
+    """
+    if group == "python":
+        return (RULES_DIR / "python", RULES_DIR / "supply-chain")
+    if group == "javascript":
+        return (RULES_DIR / "frontend",)
+    return (RULES_DIR,)
+
+
+async def _scan_sast_by_language(
+    files: list[str | Path] | tuple[str | Path, ...],
+    timeout: float,
+    exclude: tuple[str, ...] = (),
+) -> tuple[str, Any]:
+    """Scan SAST files with per-language rule dirs, chunked and merged.
+
+    Partition via :func:`_sast_targets_by_language`; each non-empty group
+    scans with its :func:`_sast_rule_dirs` configs (a group with no files
+    is never invoked). Large groups chunk at :data:`SAST_FILES_PER_SCAN`
+    sharing the lane budget evenly across all chunks; payloads merge via
+    :func:`_merge_sast_payloads`. A chunk timeout raises
+    :class:`_SastPartialTimeout` carrying findings-so-far, same as the
+    pre-split repo lane. Shared by ``scan_diff`` and ``scan_repo`` so the
+    split branching lives in exactly one place.
+    """
+    grouped = _sast_targets_by_language([Path(item) for item in files])
+    jobs: list[tuple[str, list[Path]]] = []
+    for group in ("python", "javascript", "other"):
+        group_files = grouped[group]
+        if not group_files:
+            continue
+        for i in range(0, len(group_files), SAST_FILES_PER_SCAN):
+            jobs.append((group, group_files[i : i + SAST_FILES_PER_SCAN]))
+    if not jobs:
+        return SEMGREP_ENGINE, {"results": []}
+    per_chunk = timeout / len(jobs)
+    payloads: list[Any] = []
+    engine = SEMGREP_ENGINE
+    for group, chunk in jobs:
+        try:
+            engine, payload = await _scan_sast(
+                chunk, per_chunk, exclude, _sast_rule_dirs(group)
+            )
+        except ScannerTimeoutError as exc:
+            raise _SastPartialTimeout(
+                exc.binary, _merge_sast_payloads(payloads), engine
+            ) from None
+        payloads.append(payload)
+    return engine, _merge_sast_payloads(payloads)
 
 
 def _enumerate_sast_files(target: Path, excludes: tuple[str, ...]) -> list[Path]:
@@ -730,25 +815,16 @@ async def _scan_sast_repo_files(
     target files"); explicit files bypass enumeration, same class as the L3
     scan_diff fix. ``--exclude`` flags stay on every argv (defense in depth)
     and the opengrep fallback is per-chunk identical. Empty candidate list
-    returns ok/empty without spawning. Cache keys are unchanged: the key
-    already digests target content (relpath+size+mtime) plus normalized
-    excludes, and the candidate SET is a pure function of those two, so file
-    lists and chunking need no key change.
+    returns ok/empty without spawning. Per-language rule dirs apply via
+    :func:`_scan_sast_by_language` (shared with ``scan_diff``). Cache keys
+    are unchanged: the key already digests target content (relpath+size+mtime)
+    plus normalized excludes, and the candidate SET is a pure function of
+    those two, so file lists and chunking need no key change.
     """
     files = _enumerate_sast_files(target, exclude)
     if not files:
         return SEMGREP_ENGINE, {"results": []}
-    chunks = [files[i : i + SAST_FILES_PER_SCAN] for i in range(0, len(files), SAST_FILES_PER_SCAN)]
-    per_chunk = timeout / len(chunks)
-    payloads: list[Any] = []
-    engine = SEMGREP_ENGINE
-    for chunk in chunks:
-        try:
-            engine, payload = await _scan_sast(chunk, per_chunk, exclude)
-        except ScannerTimeoutError as exc:
-            raise _SastPartialTimeout(exc.binary, _merge_sast_payloads(payloads), engine) from None
-        payloads.append(payload)
-    return engine, _merge_sast_payloads(payloads)
+    return await _scan_sast_by_language(files, timeout, exclude)
 
 
 async def _run_bandit(
@@ -1190,8 +1266,10 @@ async def scan_diff(
     scanner error or timeout, so finding content never lingers. The result
     carries ``languages`` (detect_languages over the materialized files);
     when no python files are in the diff, bandit is skipped with reason
-    "no python files in diff". Semgrep keeps the joint call over both
-    language groups (per-language rule dirs are the T2 hook).
+    "no python files in diff". Semgrep scans per language group via
+    :func:`_scan_sast_by_language` (python: ``rules/python`` +
+    ``rules/supply-chain``; javascript: ``rules/frontend``; other: joint
+    ``rules/``); empty groups are never invoked.
     """
     if not diff or not diff.strip():
         return {"status": "empty-diff", "findings": []}
@@ -1226,7 +1304,7 @@ async def scan_diff(
         # Semgrep skips gitignored dirs (.bravoguard/tmp); explicit files bypass the skip.
         # Bandit ignores gitignore so it keeps the workdir; repo scans keep dir targets.
         jobs = [
-            ("sast", _scan_sast(files, budget, excludes)),
+            ("sast", _scan_sast_by_language(files, budget, excludes)),
             ("betterleaks", secrets_job),
         ]
         if py_files:

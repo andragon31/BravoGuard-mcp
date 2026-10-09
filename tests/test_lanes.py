@@ -185,16 +185,20 @@ def install_lane_fake(monkeypatch: pytest.MonkeyPatch, calls: list, missing: set
 def test_oxlint_argv_uses_json_format_and_win32_cmd_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     posix = orchestrator.oxlint_argv("target")
-    assert posix == ["oxlint", "--format", "json", "target"]
+    assert posix[:2] == ["oxlint", "--config"]
+    assert posix[2].endswith(".oxlintrc.json")
+    assert "--format" in posix and "json" in posix and posix[-1] == "target"
     monkeypatch.setattr(sys, "platform", "win32")
     win = orchestrator.oxlint_argv("target")
     assert win[:3] == ["cmd", "/c", "oxlint"]
-    assert "--format" in win and "json" in win and win[-1] == "target"
+    assert "--config" in win and "--format" in win and "json" in win and win[-1] == "target"
 
 
 def test_oxlint_argv_forwards_excludes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "platform", "linux")
     argv = orchestrator.oxlint_argv("target", ("*.min.js", "vendor/"))
+    assert "--config" in argv
+    assert argv.index("--config") < argv.index("target")
     assert "--ignore-pattern=*.min.js" in argv
     assert "--ignore-pattern=vendor/" in argv
     assert argv[-1] == "target"
@@ -202,7 +206,7 @@ def test_oxlint_argv_forwards_excludes(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_trivy_argv_excludes_secret_scanner_and_translates_excludes() -> None:
     argv = orchestrator.trivy_argv("target", ("frames/", "*.wav", "skip.py"))
-    assert argv[:6] == ["trivy", "fs", "--format", "json", "--scanners", "vuln,misconfig"]
+    assert argv[:6] == ["trivy", "fs", "--format", "json", "--scanners", "vuln,misconfig,license"]
     scanners = argv[argv.index("--scanners") + 1]
     assert "secret" not in scanners.split(",")
     assert argv[-1] == "target"
@@ -220,7 +224,7 @@ def test_trivy_argv_default_has_no_skip_flags() -> None:
         "--format",
         "json",
         "--scanners",
-        "vuln,misconfig",
+        "vuln,misconfig,license",
         "target",
     ]
 

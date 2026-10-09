@@ -6,7 +6,7 @@ Single source for the finding schema and all scanner parsers:
 - Python: bandit JSON.
 - Secrets: betterleaks JSON (Secret/Match values are never read).
 - Frontend: oxlint ``--format json`` (``diagnostics`` list).
-- Container/IaC: trivy ``fs --format json`` (``Results`` list).
+- Container/IaC/license: trivy ``fs --format json`` (``Results`` list).
 - IaC: checkov ``-o json`` (``results.failed_checks``).
 - Supply: typosquat + bundled-binary findings pass through
   (:func:`normalize_supply`) — emitted normalized, never an error.
@@ -271,10 +271,15 @@ def normalize_trivy(payload: Any) -> list[dict[str, Any]]:
     Vulnerabilities: [{VulnerabilityID, PkgName, InstalledVersion,
     FixedVersion, Severity, Title, CweIDs[], PrimaryURL}],
     Misconfigurations: [{ID, Title, Message, Resolution, Severity,
-    CauseMetadata: {StartLine}}]}]}``. Missing ``Results`` (clean target)
+    CauseMetadata: {StartLine}}],
+    Licenses: [{PkgName, PkgVersion/InstalledVersion, Name, Confidence,
+    Link, CweIDs[]}]}]}``. Missing ``Results`` (clean target)
     yields no findings. Vuln rules are ``trivy-<VulnerabilityID>`` with the
     first ``CweIDs`` entry (else empty); misconfig rules are
-    ``trivy-<ID>`` with ``Resolution`` as the fix hint.
+    ``trivy-<ID>`` with ``Resolution`` as the fix hint; license rules are
+    ``trivy-license-<PkgName>-<Name>`` at LOW severity (license signal
+    never escalates) with ``cwe`` empty unless the entry carries
+    ``CweIDs`` and a fix hint naming the package for license review.
     """
     results = payload.get("Results", []) if isinstance(payload, dict) else []
     findings = []
@@ -315,6 +320,27 @@ def normalize_trivy(payload: Any) -> list[dict[str, Any]]:
                     _capped_severity(misconfig.get("Severity")),
                     misconfig.get("Title") or misconfig.get("Message"),
                     misconfig.get("Resolution"),
+                )
+            )
+        for lic in result.get("Licenses") or []:
+            if not isinstance(lic, dict):
+                continue
+            package = str(lic.get("PkgName", "") or "")
+            name = str(
+                lic.get("Name", lic.get("License", lic.get("ID", "unknown"))) or "unknown"
+            )
+            version = str(lic.get("PkgVersion", lic.get("InstalledVersion", "")) or "")
+            cwe_ids = lic.get("CweIDs") or []
+            at_version = f" {version}" if version else ""
+            findings.append(
+                make_finding(
+                    f"trivy-license-{package or 'unknown'}-{name}",
+                    _cwe_text(cwe_ids[0]) if cwe_ids else "",
+                    target,
+                    0,
+                    "LOW",
+                    f"Package {package or 'unknown'}{at_version} uses license {name}.",
+                    f"Review license {name} for package {package or 'unknown'}{at_version}.",
                 )
             )
     return findings

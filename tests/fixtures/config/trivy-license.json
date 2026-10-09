@@ -1,0 +1,41 @@
+{
+  "SchemaVersion": 2,
+  "ArtifactName": "bg-license",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "package-lock.json",
+      "Class": "license",
+      "Type": "npm",
+      "Licenses": [
+        {
+          "PkgName": "lodash",
+          "PkgVersion": "4.17.21",
+          "Name": "MIT",
+          "Confidence": 1.0,
+          "Link": "https://opensource.org/licenses/MIT"
+        },
+        {
+          "PkgName": "some-copyleft-lib",
+          "PkgVersion": "1.0.0",
+          "Name": "GPL-3.0",
+          "Confidence": 1.0,
+          "Link": "https://opensource.org/licenses/GPL-3.0"
+        }
+      ]
+    },
+    {
+      "Target": "requirements.txt",
+      "Class": "lang-pkgs",
+      "Type": "pip",
+      "Licenses": [
+        {
+          "PkgName": "django",
+          "PkgVersion": "4.2",
+          "Name": "BSD-3-Clause",
+          "Confidence": 1.0
+        }
+      ]
+    }
+  ]
+}

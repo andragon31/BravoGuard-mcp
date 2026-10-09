@@ -492,8 +492,9 @@ def test_sast_repo_files_chunks_at_hundred(tmp_path: Path, monkeypatch: pytest.M
     assert payload == {"results": []}
     semgrep_calls = [argv for argv in calls if Path(argv[0]).name == "semgrep"]
     assert len(semgrep_calls) == 2
-    assert len(semgrep_calls[0]) - 6 == 100  # 5 fixed argv + 1 --exclude flag
-    assert len(semgrep_calls[1]) - 6 == 1
+    # T2 split: 8 fixed argv (semgrep + 2 --config pairs + --json + --quiet + 1 --exclude).
+    assert len(semgrep_calls[0]) - 8 == 100
+    assert len(semgrep_calls[1]) - 8 == 1
     for argv in semgrep_calls:
         assert "--exclude=*.wav" in argv
         assert all(part.endswith(".py") for part in argv[-100:] if part.startswith(str(tmp_path)))
