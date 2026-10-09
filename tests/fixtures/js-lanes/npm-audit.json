@@ -1,0 +1,57 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "lodash": {
+      "name": "lodash",
+      "severity": "high",
+      "isDirect": true,
+      "via": [
+        {
+          "name": "lodash",
+          "severity": "high",
+          "title": "Prototype pollution in lodash",
+          "url": "https://github.com/advisories/GHSA-4xc9-xhrj-v574"
+        }
+      ],
+      "effects": [],
+      "range": "<4.17.21",
+      "nodes": ["node_modules/lodash"],
+      "fixAvailable": {
+        "name": "lodash",
+        "version": "4.17.21",
+        "isSemVerMajor": false
+      }
+    },
+    "minimist": {
+      "name": "minimist",
+      "severity": "critical",
+      "isDirect": false,
+      "via": [
+        {
+          "name": "minimist",
+          "severity": "critical",
+          "title": "Prototype pollution in minimist",
+          "url": "https://github.com/advisories/GHSA-xvch-5gv4-984h"
+        }
+      ],
+      "effects": [],
+      "range": "<1.2.6",
+      "nodes": ["node_modules/minimist"],
+      "fixAvailable": true
+    },
+    "debug": {
+      "name": "debug",
+      "severity": "low",
+      "isDirect": false,
+      "via": ["debug"],
+      "effects": [],
+      "range": "2.6.8",
+      "nodes": ["node_modules/debug"],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": { "info": 0, "low": 1, "moderate": 0, "high": 1, "critical": 1, "total": 3 },
+    "dependencies": { "prod": 5, "dev": 0, "optional": 0, "peer": 0, "peerOptional": 0, "total": 5 }
+  }
+}

@@ -46,6 +46,13 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   vulture dead-code (confidence floor, tolerant line parser), deptry hygiene (manifest-gated,
   tmpfile JSON). deptry+vulture added to PYTHON_TOOLS installs. Shared old fakes force the three
   missing so skips are hermetic on every machine. 31 new tests.
+- T7 JS depth lanes (`feature/bravoguard-py-js-containers`, `src/bravoguard/orchestrator.py` +
+  `src/bravoguard/normalizer.py` + `src/bravoguard/languages.py` + `eslint.config.mjs` (new) +
+  `tools-manifest.json` + `scripts/install.py` + `scripts/install_external.py` +
+  `tests/test_js_lanes.py` + `tests/fixtures/js-lanes/`): oxlint in scan_diff, eslint specialist
+  (core security rules; plugin/Hooks/Next/a11y/type-aware cut documented), knip dead-code
+  (manifest-gated, reporter json), lockfile-lint (lockfile-gated, npm/yarn), npm audit
+  (built-in, severity capped HIGH). lockfile-lint pinned (npm 5.0.1). 33 new tests.
 - H1 supply-plus (`feature/bravoguard-supply-plus`, `src/bravoguard/supply.py` +
   `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` +
   `src/bravoguard/suggest.py` + `tests/test_supply_plus.py`): Windows

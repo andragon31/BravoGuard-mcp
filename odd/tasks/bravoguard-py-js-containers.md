@@ -42,7 +42,7 @@ Review: native review per work-unit candidate per user-owned RDD switch (inspect
 - [ ] T4 (Fase 1.2): Syft SBOM store + Grype lane + CVE secondary dedup. Surfaces: orchestrator.py, normalizer.py, cache.py, tests + fixtures.
 - [x] T4 (Fase 1.2): Syft SBOM store + Grype lane + CVE secondary dedup. DONE commit `b75a29d`. Suite 348 passed + 10 skipped, ruff clean. Native review lineage `review-9cd9474f8ac2813a`: approved clean (no advisories) + acknowledged. 5 frozen T1 asserts updated inline by parent (syft/grype skips). Surfaces were: cache.py, languages.py, normalizer.py, orchestrator.py, tests/test_sbom.py (new, 26 tests) + fixtures.
 - [x] T5 (Fase 1.3): GuardDog Linux lane (win32 skip with reason). DONE commit `505cae2`. Suite 367 passed + 10 skipped, ruff clean. 5 frozen T1 asserts updated inline by parent (guarddog skips). NATIVE REVIEW DEFERRED (not declined): branch-cumulative candidate exceeds lens context budget (`lens_context_budget_exceeded`, no lineage created); slice-scoped START systematically rejected (`retained-selection-candidate-mismatch` x2 with fresh inspect between). User decision pending: continue functional-only vs disable switch vs restructure. Functional verification stands (19 new tests green + full suite + ruff). Surfaces were: orchestrator.py, normalizer.py, languages.py, tests/test_guarddog.py (new, 19 tests) + fixtures.
-- [ ] T6 (Fase 2): Python lanes — ruff (no-S), vulture, deptry (manifest-gated), SBOM feed to grype. Surfaces: orchestrator.py, normalizer.py, tests + fixtures.
+- [x] T6 (Fase 2): Python lanes — ruff (no-S), vulture, deptry (manifest-gated). DONE commit `4370f23`. Suite 398 passed + 10 skipped, ruff clean. 18 frozen asserts updated inline by parent (shared fakes now force ruff/vulture/deptry missing -> hermetic skips on every machine; ruff-installed dev boxes no longer diverge). Native review deferred under the same standing T5 decision (cumulative candidate over budget). Surfaces were: orchestrator.py, normalizer.py, languages.py, cli.py, scripts/install.py, scripts/install_external.py, tests/test_python_lanes.py (new, 31 tests) + fixtures.
 - [ ] T7 (Fase 3): JS lanes — oxlint in scan_diff, eslint+security runner+config, knip, lockfile-lint, npm audit (manifest-gated). Surfaces: server.py?, orchestrator.py, normalizer.py, tests + fixtures.
 - [ ] T8 (Fase 4): containers — hadolint + DL->CWE map + fix templates, kics (compose/dockerfile only), dockle/dive opt-in + recommendations[]. Surfaces: orchestrator.py, normalizer.py, suggest.py, tests + fixtures.
 - [ ] T9 (Fase 5): enrich.py (EPSS+KEV) + osv_lookup HTTP-first. Surfaces: src/bravoguard/enrich.py (new), osv.py, orchestrator.py, tests (mocked network).
@@ -50,7 +50,7 @@ Review: native review per work-unit candidate per user-owned RDD switch (inspect
 
 ## Progress
 - Branch `feature/bravoguard-py-js-containers` from master `21051ce`. Base: 269 passed, 10 skipped.
-- T0 done. T1 done (45c6c0c, review ok). T2 done (a703525, review ok). T3 done (76e6530, review ok). T4 done (b75a29d, review ok clean). T5 done (505cae2, functional ok, native review deferred — user decision pending). T6 delegated (worker mv0gkfn4-6-zsfi).
+- T0 done. T1 done (45c6c0c, review ok). T2 done (a703525, review ok). T3 done (76e6530, review ok). T4 done (b75a29d, review ok clean). T5 done (505cae2, functional ok, review deferred). T6 done (4370f23, functional ok, review deferred — same standing decision). T7 delegated.
 
 ## Verification evidence
 - Per task `<command>: <observed result>`; parent spot-checks one check per delegated task.

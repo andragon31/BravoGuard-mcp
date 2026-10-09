@@ -12,8 +12,9 @@
     {"name": "trufflehog", "version": "v3.95.x", "role": "secrets verify", "source": "github:trufflesecurity/trufflehog"},
     {"name": "oxlint", "version": "1.65.0", "role": "frontend primary lint", "source": "npm:oxlint"},
     {"name": "biome", "version": "2.4+", "role": "frontend lint+format (new projects)", "source": "npm:@biomejs/biome"},
-    {"name": "eslint", "version": "10.4.0", "role": "frontend specialist (Hooks/Next/a11y/security)", "source": "npm:eslint"},
+    {"name": "eslint", "version": "10.4.0", "role": "frontend specialist (core security rules only; plugin/Hooks/Next/a11y cut per T7)", "source": "npm:eslint"},
     {"name": "knip", "version": "5", "role": "dead code", "source": "npm:knip"},
+    {"name": "lockfile-lint", "version": "5.0.1", "role": "lockfile policy (https/hosts/scheme)", "source": "npm:lockfile-lint"},
     {"name": "madge", "version": "8", "role": "circular deps", "source": "npm:madge"},
     {"name": "jscpd", "version": "4", "role": "duplicates", "source": "npm:jscpd"}
   ]

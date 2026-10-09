@@ -80,7 +80,7 @@ def _force_py_lanes_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hermetic T6: ruff ships on some dev machines — force the new lanes
     missing so skips (never errors) are deterministic everywhere."""
     real_which = shutil.which
-    _missing = {"ruff", "vulture", "deptry"}
+    _missing = {"ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm"}
 
     def _which(name: str) -> str | None:
         if Path(str(name)).name in _missing:
@@ -442,7 +442,14 @@ def test_lanes_for_py_only_skips_js_lanes(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n', encoding="utf-8")
     (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
     skips = lanes_for(detect_languages(tmp_path))
-    assert skips == {"oxlint": "no javascript files or markers detected"}
+    # T7: eslint suffix-gated + knip/lockfile/npm manifest-gated on javascript.
+    assert skips == {
+        "oxlint": "no javascript files or markers detected",
+        "eslint": "no javascript files or markers detected",
+        "knip": "no javascript manifests detected",
+        "lockfile-lint": "no javascript lockfiles detected",
+        "npm-audit": "no javascript manifests detected",
+    }
 
 
 def test_lanes_for_js_only_skips_python_lanes(tmp_path: Path) -> None:
@@ -451,6 +458,8 @@ def test_lanes_for_js_only_skips_python_lanes(tmp_path: Path) -> None:
     skips = lanes_for(detect_languages(tmp_path))
     # sast covers both languages so it still runs on JS; supply needs py manifests.
     # T6: ruff/vulture suffix-gated + deptry manifest-gated on python.
+    # (lanes_for is pure markers: knip/lockfile/npm gates pass on package.json,
+    # so only python-gated lanes appear here — no T7 keys.)
     assert skips == {
         "bandit": "no python files or markers detected",
         "supply": "no python manifests detected",
@@ -465,7 +474,7 @@ def test_lanes_for_empty_dir_skips_all_gated(tmp_path: Path) -> None:
     # T4: syft/grype gated on any-stack signals; empty dir skips them too.
     # T5: guarddog manifest-gated; empty dir skips it too.
     # T6: ruff/vulture suffix-gated + deptry manifest-gated skip on empty too.
-    assert set(skips) == {"sast", "bandit", "oxlint", "supply", "syft", "grype", "guarddog", "ruff", "vulture", "deptry"}
+    assert set(skips) == {"sast", "bandit", "oxlint", "supply", "syft", "grype", "guarddog", "ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm-audit"}
     assert skips["sast"] == "no python or javascript files detected"
     assert skips["supply"] == "no python manifests detected"
 
@@ -497,9 +506,14 @@ def test_scan_diff_py_only_runs_bandit(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["status"] == "ok"
     # T6: ruff/vulture forced missing + deptry always skipped in diffs.
     assert result["skipped"] == {
+        "oxlint": "no javascript files in diff",
+        "eslint": "no javascript files in diff",
         "ruff": "ruff not installed: python lint lane skipped",
         "vulture": "vulture not installed: dead-code lane skipped",
         "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+        "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
+        "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
+        "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
     }
     assert result["languages"]["languages"] == ["python"]
     assert "bandit" in spawned_binaries(calls)
@@ -515,11 +529,17 @@ def test_scan_diff_js_only_skips_bandit(monkeypatch: pytest.MonkeyPatch) -> None
     assert result["status"] == "ok"
     assert result["languages"]["languages"] == ["javascript"]
     # T6: suffix gates are deterministic (no which involved); deptry always skipped in diffs.
+    # T7: oxlint/eslint forced missing; knip/lockfile/npm always skipped in diffs.
     assert result["skipped"] == {
+        "oxlint": "oxlint not installed: frontend lint lane skipped",
         "bandit": "no python files in diff",
         "ruff": "no python files in diff",
         "vulture": "no python files in diff",
         "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+        "eslint": "eslint not installed: specialist lint lane skipped",
+        "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
+        "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
+        "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
     }
     assert "bandit" not in spawned_binaries(calls)
     assert "semgrep" in spawned_binaries(calls)
@@ -538,10 +558,16 @@ def test_scan_diff_mixed_bandit_runs_semgrep_covers_both(
     assert result["status"] == "ok"
     assert result["languages"]["languages"] == ["python", "javascript"]
     # T6: ruff/vulture forced missing + deptry always skipped in diffs.
+    # T7: oxlint/eslint forced missing; knip/lockfile/npm always skipped in diffs.
     assert result["skipped"] == {
+        "oxlint": "oxlint not installed: frontend lint lane skipped",
         "ruff": "ruff not installed: python lint lane skipped",
         "vulture": "vulture not installed: dead-code lane skipped",
         "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+        "eslint": "eslint not installed: specialist lint lane skipped",
+        "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
+        "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
+        "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
     }
     assert "bandit" in spawned_binaries(calls)
     semgrep_argvs = [a for a in calls if Path(str(a[0])).name == "semgrep"]
@@ -577,10 +603,16 @@ def test_scan_diff_mixed_findings_identical_to_ungated(
     expected = normalize_findings(normalize_semgrep(semgrep_raw) + normalize_bandit(bandit_raw))
     assert result["findings"] == expected
     # T6: ruff/vulture forced missing + deptry always skipped in diffs.
+    # T7: oxlint/eslint forced missing; knip/lockfile/npm always skipped in diffs.
     assert result["skipped"] == {
+        "oxlint": "oxlint not installed: frontend lint lane skipped",
         "ruff": "ruff not installed: python lint lane skipped",
         "vulture": "vulture not installed: dead-code lane skipped",
         "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+        "eslint": "eslint not installed: specialist lint lane skipped",
+        "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
+        "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
+        "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
     }
 
 
@@ -597,8 +629,13 @@ def test_scan_repo_py_only_skips_oxlint(monkeypatch: pytest.MonkeyPatch) -> None
     # T4: syft/grype binaries absent here -> missing-binary skips.
     # T5: guarddog binary absent here -> missing-binary skip.
     # T6: ruff/vulture/deptry forced missing (hermetic everywhere).
+    # T7: eslint suffix-gated + knip/lockfile/npm manifest-gated on javascript.
     assert result["skipped"] == {
         "oxlint": "no javascript files or markers detected",
+        "eslint": "no javascript files or markers detected",
+        "knip": "no javascript manifests detected",
+        "lockfile-lint": "no javascript lockfiles detected",
+        "npm-audit": "no javascript manifests detected",
         "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
         "syft": "syft not installed: SBOM store skipped",
         "grype": "syft SBOM unavailable: no SBOM to match",
@@ -631,6 +668,10 @@ def test_scan_repo_js_only_skips_bandit_and_supply(
         "ruff": "no python files or markers detected",
         "vulture": "no python files or markers detected",
         "deptry": "no python manifests detected",
+        "eslint": "eslint not installed: specialist lint lane skipped",
+        "knip": "knip not installed: dead-code lane skipped",
+        "lockfile-lint": "lockfile-lint not installed: lockfile-policy lane skipped",
+        "npm-audit": "npm not installed: audit lane skipped",
     }
     binaries = spawned_binaries(calls)
     assert "oxlint" in binaries
@@ -650,7 +691,7 @@ def test_scan_repo_container_only_skips_code_lanes(
     # T6: ruff/vulture/deptry gate-skipped (deterministic, no which involved).
     assert set(result["skipped"]) == {
         "sast", "bandit", "oxlint", "supply", "trufflehog", "syft", "grype", "guarddog",
-        "ruff", "vulture", "deptry",
+        "ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm-audit",
     }
     binaries = spawned_binaries(calls)
     assert {"trivy", "checkov"} <= binaries
@@ -700,6 +741,10 @@ def test_scan_repo_mixed_findings_identical_to_ungated(
         "ruff": "ruff not installed: python lint lane skipped",
         "vulture": "vulture not installed: dead-code lane skipped",
         "deptry": "deptry not installed: dependency-hygiene lane skipped",
+        "eslint": "eslint not installed: specialist lint lane skipped",
+        "knip": "knip not installed: dead-code lane skipped",
+        "lockfile-lint": "lockfile-lint not installed: lockfile-policy lane skipped",
+        "npm-audit": "npm not installed: audit lane skipped",
     }
     assert result["languages"]["languages"] == ["python", "javascript"]
     assert result["languages"]["typescript"] is True

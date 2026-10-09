@@ -28,6 +28,18 @@ Single source for the finding schema and all scanner parsers:
 - Supply vulns: grype ``sbom:... -o json`` matches (:func:`normalize_grype`).
   Severities cap CRITICAL -> HIGH via :func:`_capped_severity` (same policy
   as trivy: engine-assigned without exploit context).
+- JS specialist (T7): eslint ``--format json`` (:func:`normalize_eslint`) —
+  ``rule_id`` is ``eslint-<rule>``, severity capped at MEDIUM (lint policy,
+  same as oxlint: error -> MEDIUM, warning -> LOW), ``cwe`` only where the
+  rule documents one (core security-adjacent rules carry none, so empty).
+- JS dead code (T7): knip ``--reporter json`` (:func:`normalize_knip`) —
+  ``rule_id`` is ``knip-<kind>`` (files/dependencies/exports/...), LOW
+  (unused code/deps are latent attack surface), remove hint.
+- JS lockfile policy (T7): lockfile-lint plain text (:func:`normalize_lockfile_lint`)
+  — ``rule_id`` is ``lockfile-<check>`` (https/hosts/scheme), LOW, regenerate hint.
+- JS vulns (T7): npm audit ``--json`` (:func:`normalize_npm_audit`) —
+  severity pass-through capped at HIGH (mirror trivy policy), fix versions
+  in the hint.
 
 Schema (``FINDING_KEYS``): ``rule_id, cwe, path, line, severity, message,
 fix_hint, epss, kev, reachability_note``. ``epss`` is a float in [0, 1] or
@@ -336,6 +348,284 @@ def normalize_oxlint(payload: Any) -> list[dict[str, Any]]:
                 _oxlint_severity(item.get("severity")),
                 item.get("message"),
                 item.get("help"),
+            )
+        )
+    return findings
+
+
+def _eslint_severity(value: Any) -> str:
+    """ESLint numeric severity -> LOW/MEDIUM (lint policy cap).
+
+    ``2`` (error) -> MEDIUM, anything else (``1``/warning) -> LOW — the same
+    lint-signal cap as :func:`_oxlint_severity` (no CVE, never above MEDIUM).
+    """
+    try:
+        return "MEDIUM" if int(value) == 2 else "LOW"
+    except (TypeError, ValueError):
+        return "LOW"
+
+
+def _eslint_rule_id(rule_id: Any) -> str:
+    """``no-eval`` -> ``eslint-no-eval`` (null/fatal -> ``eslint-unknown``)."""
+    text = str(rule_id or "").strip()
+    return f"eslint-{text}" if text else "eslint-unknown"
+
+
+def _eslint_fix_hint(rule_id: Any) -> str:
+    """Docs-link hint for one ESLint rule (core rules have no autofix text)."""
+    text = str(rule_id or "").strip()
+    if not text:
+        return "Fix the reported syntax error so the file parses."
+    short = text.split("/")[-1]
+    return (
+        "Address per the ESLint rule docs: "
+        f"https://eslint.org/docs/rules/{short} (avoid dynamic code execution)."
+    )
+
+
+def normalize_eslint(payload: Any) -> list[dict[str, Any]]:
+    """Map ESLint ``--format json`` results to the unified shape.
+
+    Recorded shape (documented source — binary absent in this env, live
+    ``--help`` re-verification owed): a list of ``{"filePath", "messages":
+    [{"ruleId", "severity" (2 error / 1 warning), "message", "line"}]}``.
+    Rules become ``eslint-<ruleId>`` (the ``eslint-`` namespace keeps oxlint
+    findings distinct by construction); severity follows :func:`_eslint_severity`
+    (capped at MEDIUM per the lint policy); ``cwe`` stays empty — none of the
+    enabled core security-adjacent rules (``no-eval``, ``no-implied-eval``,
+    ``no-new-func``, ``no-script-url``) documents a CWE in its rule docs, so
+    there is nothing honest to map (same honesty as oxlint/checkov blanks).
+    Null ``ruleId`` entries (fatal parse errors) become ``eslint-unknown``.
+    """
+    items = payload if isinstance(payload, list) else []
+    findings = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        file_path = entry.get("filePath", entry.get("filename", ""))
+        messages = entry.get("messages", [])
+        if not isinstance(messages, list):
+            continue
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            rule_id = message.get("ruleId")
+            findings.append(
+                make_finding(
+                    _eslint_rule_id(rule_id),
+                    "",
+                    file_path,
+                    message.get("line", 0),
+                    _eslint_severity(message.get("severity")),
+                    message.get("message"),
+                    _eslint_fix_hint(rule_id),
+                )
+            )
+    return findings
+
+
+KNIP_FIX_HINT = (
+    "Remove the unused file, export, or dependency (dead code is latent "
+    "attack surface); re-run knip to confirm."
+)
+
+KNIP_KIND_LABEL: dict[str, str] = {
+    "files": "file",
+    "dependencies": "dependency",
+    "devDependencies": "devDependency",
+    "exports": "export",
+    "types": "type",
+    "unlisted": "unlisted dependency",
+}
+
+
+def normalize_knip(payload: Any) -> list[dict[str, Any]]:
+    """Map knip ``--reporter json`` issues to the unified finding shape.
+
+    Recorded shape (documented source — knip.dev reporters page + GitHub
+    ``cli-arguments.ts`` ``--reporter``/``--directory`` flags; binary absent):
+    ``{"issues": [{"file", "files": [{"name"}], "dependencies":
+    [{"name"}], "exports": [{"name", "line"}], "types": [...],
+    "unlisted": [...]}]}``. Each non-empty issue-type array emits one
+    finding per item: ``rule_id`` is ``knip-<kind>`` (``files``,
+    ``dependencies``, ``exports``, ...), severity LOW, ``cwe`` empty (no
+    mapping), fix hint remove. Unknown/tolerant shapes yield ``[]``.
+    """
+    issues = payload.get("issues", []) if isinstance(payload, dict) else []
+    findings = []
+    for entry in issues:
+        if not isinstance(entry, dict):
+            continue
+        file_path = str(entry.get("file", ""))
+        for kind, items in entry.items():
+            if kind in ("file", "owners"):
+                continue
+            if not isinstance(items, list) or not items:
+                continue
+            for item in items:
+                if isinstance(item, dict):
+                    name = str(item.get("name", ""))
+                    line = _safe_line(item.get("line", 0))
+                else:
+                    name = str(item)
+                    line = 0
+                label = f"{name} in {file_path}" if name else file_path
+                singular = KNIP_KIND_LABEL.get(kind, kind)
+                findings.append(
+                    make_finding(
+                        f"knip-{kind}",
+                        "",
+                        file_path,
+                        line,
+                        "LOW",
+                        f"Unused {singular}: {label}.",
+                        KNIP_FIX_HINT,
+                    )
+                )
+    return findings
+
+
+LOCKFILE_FIX_HINT = (
+    "Regenerate the lockfile from a pinned https-only registry "
+    "(--allowed-hosts) and re-run lockfile-lint."
+)
+
+
+def _lockfile_check_kind(line: str) -> str:
+    """Classify one lockfile-lint output line to a ``lockfile-<check>`` kind."""
+    lowered = line.lower()
+    # Host/scheme first: those lines also mention https URLs, so a naive
+    # https-first check would misclassify them (recorded fixture proves it).
+    if "host" in lowered:
+        return "lockfile-hosts"
+    if "scheme" in lowered:
+        return "lockfile-scheme"
+    if "https" in lowered:
+        return "lockfile-https"
+    return "lockfile-policy"
+
+
+def normalize_lockfile_lint(payload: Any) -> list[dict[str, Any]]:
+    """Map lockfile-lint plain-text output to the unified finding shape.
+
+    The lane runner captures combined stdout+stderr (the real binary
+    ``console.error``\\ s each validator failure, so stdout alone is empty).
+    Payload: ``{"lockfile": path, "output": text}`` or the multi-lockfile
+    envelope ``{"results": [{"lockfile", "output"}]}`` from
+    :func:`bravoguard.orchestrator._run_lockfile_lints`. Each non-empty output
+    line becomes one LOW finding with ``rule_id`` from :func:`_lockfile_check_kind`
+    (https/hosts/scheme/policy), ``cwe`` empty (policy signal, no mapping),
+    and a regenerate/pin-registry hint. Empty output means a clean lockfile
+    (``[]``, not an error).
+    """
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        findings: list[dict[str, Any]] = []
+        for entry in payload["results"]:
+            findings.extend(normalize_lockfile_lint(entry))
+        return findings
+    if not isinstance(payload, dict):
+        return []
+    lockfile = str(payload.get("lockfile", ""))
+    output = payload.get("output", "")
+    if not isinstance(output, str) or not output.strip():
+        return []
+    findings = []
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        findings.append(
+            make_finding(
+                _lockfile_check_kind(line),
+                "",
+                lockfile,
+                0,
+                "LOW",
+                line,
+                LOCKFILE_FIX_HINT,
+            )
+        )
+    return findings
+
+
+def _npm_audit_severity(value: Any) -> str:
+    """Pass-through capped at HIGH (mirror trivy policy: CRITICAL -> HIGH)."""
+    return _capped_severity(value)
+
+
+def _npm_audit_fix_hint(entry: dict[str, Any]) -> str:
+    """Fix versions from ``fixAvailable`` (object/True/False tolerant)."""
+    fix = entry.get("fixAvailable", entry.get("fix", entry.get("patched_versions")))
+    if isinstance(fix, dict):
+        version = fix.get("version", "")
+        name = entry.get("name", "")
+        if version:
+            return f"Upgrade {name} to {version}."
+        return f"A fix is available for {name or 'the package'}; run `npm audit fix`."
+    if fix is True:
+        return "Run `npm audit fix` to apply the available fix."
+    return "No automatic fix available; upgrade the dependency manually."
+
+
+def _npm_audit_message(name: str, entry: dict[str, Any]) -> str:
+    """Best-effort title: ``via`` objects carry advisory titles (v7+ shape)."""
+    via = entry.get("via")
+    if isinstance(via, list):
+        for item in via:
+            if isinstance(item, dict) and item.get("title"):
+                return str(item["title"])
+    title = entry.get("title", entry.get("overview", ""))
+    if title:
+        return str(title)
+    return f"Vulnerable dependency: {name}."
+
+
+def normalize_npm_audit(payload: Any) -> list[dict[str, Any]]:
+    """Map ``npm audit --json`` vulnerabilities to the unified shape.
+
+    Recorded shape (documented source — npm docs; modern auditReportVersion 2
+    ``vulnerabilities`` map; the legacy ``advisories`` map is accepted too):
+    ``{"vulnerabilities": {name: {severity, via: [{title}], fixAvailable,
+    range}}}``. Rules are ``npm-audit-<name>``; severity passes through but
+    caps CRITICAL -> HIGH (same policy as trivy/grype); ``cwe`` stays empty
+    (audit entries carry advisory URLs, not CWEs); paths are the first
+    ``nodes`` entry (else the package name); fix versions land in the hint.
+    """
+    if not isinstance(payload, dict):
+        return []
+    vulns = payload.get("vulnerabilities")
+    if isinstance(vulns, dict):
+        items = vulns.items()
+    else:
+        advisories = payload.get("advisories")
+        if not isinstance(advisories, dict):
+            return []
+        items = advisories.items()
+    findings = []
+    for key, entry in items:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", entry.get("module_name", key)) or key)
+        nodes = entry.get("nodes")
+        if isinstance(nodes, list) and nodes:
+            path = str(nodes[0])
+        else:
+            findings_paths: Any = entry.get("findings")
+            if isinstance(findings_paths, list) and findings_paths:
+                first = findings_paths[0]
+                paths = first.get("paths") if isinstance(first, dict) else None
+                path = str(paths[0]) if isinstance(paths, list) and paths else name
+            else:
+                path = name
+        findings.append(
+            make_finding(
+                f"npm-audit-{name}",
+                "",
+                path,
+                0,
+                _npm_audit_severity(entry.get("severity")),
+                _npm_audit_message(name, entry),
+                _npm_audit_fix_hint(entry),
             )
         )
     return findings

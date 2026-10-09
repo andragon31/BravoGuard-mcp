@@ -35,13 +35,14 @@ INSTALL_TIMEOUT = 300
 
 PYTHON_TOOLS = ["semgrep", "bandit", "guarddog", "pip-audit", "ruff", "deptry", "vulture"]
 CORE_BINARIES = ["osv-scanner", "syft", "trivy", "checkov", "betterleaks", "trufflehog", "oxlint"]
-OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "madge", "jscpd"]
+OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "lockfile-lint", "madge", "jscpd"]
 
 NPM_PKGS = {
     "oxlint": "oxlint",
     "biome": "@biomejs/biome",
     "eslint": "eslint",
     "knip": "knip",
+    "lockfile-lint": "lockfile-lint",
     "madge": "madge",
     "jscpd": "jscpd",
 }

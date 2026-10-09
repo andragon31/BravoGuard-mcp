@@ -1,0 +1,62 @@
+[
+  {
+    "filePath": "app.js",
+    "messages": [
+      {
+        "ruleId": "no-eval",
+        "severity": 2,
+        "message": "eval can be harmful.",
+        "line": 1,
+        "column": 10,
+        "nodeType": "CallExpression",
+        "endLine": 1,
+        "endColumn": 25
+      },
+      {
+        "ruleId": "no-script-url",
+        "severity": 1,
+        "message": "Script URL is a form of eval.",
+        "line": 4,
+        "column": 5,
+        "nodeType": "Literal",
+        "endLine": 4,
+        "endColumn": 28
+      }
+    ],
+    "suppressedMessages": [],
+    "errorCount": 1,
+    "fatalErrorCount": 0,
+    "warningCount": 1,
+    "fixableErrorCount": 0,
+    "fixableWarningCount": 0
+  },
+  {
+    "filePath": "src/util.js",
+    "messages": [
+      {
+        "ruleId": "no-new-func",
+        "severity": 2,
+        "message": "The Function constructor is eval.",
+        "line": 2,
+        "column": 3,
+        "nodeType": "NewExpression",
+        "endLine": 2,
+        "endColumn": 20
+      },
+      {
+        "ruleId": null,
+        "severity": 2,
+        "message": "Parsing error: unexpected token.",
+        "line": 9,
+        "column": 1,
+        "fatal": true
+      }
+    ],
+    "suppressedMessages": [],
+    "errorCount": 2,
+    "fatalErrorCount": 1,
+    "warningCount": 0,
+    "fixableErrorCount": 0,
+    "fixableWarningCount": 0
+  }
+]

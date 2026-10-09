@@ -89,6 +89,17 @@ LANE_GATES: dict[str, dict[str, Any]] = {
     "ruff": {"kind": "suffix", "languages": ("python",)},
     "vulture": {"kind": "suffix", "languages": ("python",)},
     "deptry": {"kind": "manifest", "manifests": ("python",)},
+    # T7 choice (documented): eslint is suffix-gated on javascript (it reads
+    # .js/.ts source like oxlint, so markers alone never qualify it), while
+    # knip / lockfile-lint / npm-audit are manifest-gated on javascript
+    # (knip needs package.json; lockfile-lint needs a lockfile;
+    # npm audit needs package.json — no manifest, no run). The manifest gate
+    # checks the javascript marker group; the orchestrator adds a precise
+    # second check per lane (same two-stage pattern as deptry).
+    "eslint": {"kind": "suffix", "languages": ("javascript",)},
+    "knip": {"kind": "manifest", "manifests": ("javascript",)},
+    "lockfile-lint": {"kind": "manifest", "manifests": ("javascript",)},
+    "npm-audit": {"kind": "manifest", "manifests": ("javascript",)},
 }
 
 # Machine-readable skip reasons, one per gated lane (T2+ adds its own).
@@ -103,6 +114,10 @@ SKIP_REASONS: dict[str, str] = {
     "ruff": "no python files or markers detected",
     "vulture": "no python files or markers detected",
     "deptry": "no python manifests detected",
+    "eslint": "no javascript files or markers detected",
+    "knip": "no javascript manifests detected",
+    "lockfile-lint": "no javascript lockfiles detected",
+    "npm-audit": "no javascript manifests detected",
 }
 
 

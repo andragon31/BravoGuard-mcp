@@ -1,0 +1,26 @@
+{
+  "issues": [
+    {
+      "file": "src/unused.ts",
+      "files": [{ "name": "src/unused.ts" }],
+      "dependencies": [],
+      "exports": [],
+      "types": []
+    },
+    {
+      "file": "src/math.ts",
+      "files": [],
+      "dependencies": [],
+      "exports": [{ "name": "factorial", "line": 12, "col": 14, "pos": 256 }],
+      "types": [{ "name": "Radians", "line": 20, "col": 13, "pos": 410 }]
+    },
+    {
+      "file": "package.json",
+      "files": [],
+      "dependencies": [{ "name": "lodash" }],
+      "unlisted": [{ "name": "rimraf" }],
+      "exports": [],
+      "types": []
+    }
+  ]
+}

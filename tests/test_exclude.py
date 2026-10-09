@@ -305,11 +305,17 @@ def test_scan_diff_empty_after_filter_ok(monkeypatch: pytest.MonkeyPatch) -> Non
     # T1 routing: fully-filtered diff spawns zero binaries (bandit skipped).
     assert calls == []
     # T6: suffix gates are deterministic (no which involved); deptry always skipped in diffs.
+    # T7: oxlint/eslint gate on no-js diffs; knip/lockfile/npm always skipped in diffs.
     assert result["skipped"] == {
         "bandit": "no python files in diff",
         "ruff": "no python files in diff",
         "vulture": "no python files in diff",
         "deptry": "deptry needs a project root with manifests: scan_diff lacks dependency context",
+        "oxlint": "no javascript files in diff",
+        "eslint": "no javascript files in diff",
+        "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
+        "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
+        "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
     }
 
 

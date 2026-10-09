@@ -37,6 +37,16 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
   ``deptry --json-output`` over the project root (manifest-gated on
   requirements manifests / pyproject with dependencies; repo only — diffs
   lack dependency context, same rationale as supply/guarddog).
+- JS depth (T7): ``oxlint`` over materialized .js/.ts files in ``scan_diff``
+  (same per-language groups T1 built; suffix-gated; missing-binary pre-check;
+  repo path unchanged) plus ``eslint --config eslint.config.mjs --format json``
+  over explicit js files (suffix-gated, diff + repo; core security rules only —
+  plugin/Hooks/Next/a11y cut, documented in the config); ``knip --reporter json
+  --directory`` over the project root (manifest-gated on package.json; repo only);
+  ``lockfile-lint --path/--type/--allowed-hosts/--validate-https`` per lockfile
+  (manifest-gated on lockfiles; repo only; pnpm detected but unsupported);
+  ``npm audit --json --prefix`` over the project root (manifest-gated on
+  package.json; repo only; no new binary — npm ships with node).
 - IaC: ``uv tool run --from checkov checkov -d <target> -o json`` (M1; the
   bare ``checkov`` shim is broken on Windows, ``uv tool run`` is proven).
 
@@ -151,9 +161,13 @@ from bravoguard.normalizer import (
     normalize_betterleaks,
     normalize_checkov,
     normalize_deptry,
+    normalize_eslint,
     normalize_findings,
     normalize_grype,
     normalize_guarddog,
+    normalize_knip,
+    normalize_lockfile_lint,
+    normalize_npm_audit,
     normalize_oxlint,
     normalize_ruff,
     normalize_semgrep,
@@ -183,6 +197,10 @@ DEPTRY_ENGINE = "deptry"
 SYFT_ENGINE = "syft"
 GRYPE_ENGINE = "grype"
 GUARDDOG_ENGINE = "guarddog"
+ESLINT_ENGINE = "eslint"
+KNIP_ENGINE = "knip"
+LOCKFILE_LINT_ENGINE = "lockfile-lint"
+NPM_ENGINE = "npm"
 
 # T4 skip reasons for the SBOM + second-opinion lanes (surfaced as skipped+reason).
 SYFT_MISSING_REASON = "syft not installed: SBOM store skipped"
@@ -228,9 +246,28 @@ GUARDDOG_WIN32_REASON = (
 )
 GUARDDOG_MISSING_REASON = "guarddog not installed: heuristics lane skipped"
 
+# T7 skip reasons for the JS depth lanes (surfaced as skipped+reason).
+OXLINT_MISSING_REASON = "oxlint not installed: frontend lint lane skipped"
+ESLINT_MISSING_REASON = "eslint not installed: specialist lint lane skipped"
+KNIP_MISSING_REASON = "knip not installed: dead-code lane skipped"
+KNIP_NO_MANIFEST_REASON = "knip manifest-gated: no package.json with dependencies"
+LOCKFILE_LINT_MISSING_REASON = "lockfile-lint not installed: lockfile-policy lane skipped"
+LOCKFILE_LINT_NO_LOCKFILE_REASON = (
+    "lockfile-lint manifest-gated: no package-lock.json/yarn.lock/pnpm-lock.yaml"
+)
+LOCKFILE_LINT_PNPM_REASON = (
+    "lockfile-lint skipped for pnpm-lock.yaml: only npm/yarn lockfiles supported"
+)
+NPM_AUDIT_MISSING_REASON = "npm not installed: audit lane skipped"
+NPM_AUDIT_NO_MANIFEST_REASON = "npm audit manifest-gated: no package.json"
+JS_MANIFEST_DIFF_REASON = (
+    "needs a project root with manifests: scan_diff lacks dependency context"
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
 OXLINT_CONFIG = REPO_ROOT / ".oxlintrc.json"
+ESLINT_CONFIG = REPO_ROOT / "eslint.config.mjs"
 
 # SAST candidate extensions (scan_repo file-list lane): rules/python targets
 # python (.py/.pyi), rules/frontend targets javascript+typescript
@@ -1268,6 +1305,164 @@ def _python_files(target: Path, excludes: tuple[str, ...]) -> list[Path]:
     ]
 
 
+def _js_files(target: Path, excludes: tuple[str, ...]) -> list[Path]:
+    """JS/TS sources under ``target`` for the eslint lane (oxlint reuses SAST).
+
+    Same enumeration discipline as :func:`_python_files`, filtered to
+    :data:`JS_SUFFIXES`. The oxlint diff lane reuses
+    :func:`_sast_targets_by_language` groups instead (T1-built partition).
+    """
+    return [
+        path
+        for path in _enumerate_sast_files(target, excludes)
+        if path.suffix.lower() in JS_SUFFIXES
+    ]
+
+
+def eslint_argv(
+    files: list[str | Path] | tuple[str | Path, ...] | str | Path,
+    exclude: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    """Specialist lint over explicit files (or one dir) as JSON.
+
+    Documented-source flags: eslint is absent in this env, so re-verify
+    read-only via ``eslint --help`` when present before changing them —
+    ``eslint --config <repo-root eslint.config.mjs> --format json <targets>``
+    per the eslint docs (``--format json`` emits the results array; ``--config``
+    points at the lane config explicitly because flat-config discovery is
+    CWD-relative and misses arbitrary targets — same rationale as oxlint
+    ``--config``). A single string target scans a dir (repo mode); a file
+    list scans materialized diff files. ``exclude`` becomes repeatable
+    ``--ignore-pattern`` flags (same dialect as oxlint; ``None`` adds none).
+    """
+    if isinstance(files, (str, Path)):
+        targets = [str(files)]
+    else:
+        targets = [str(item) for item in files]
+    argv = [
+        ESLINT_ENGINE,
+        "--config",
+        str(ESLINT_CONFIG),
+        "--format",
+        "json",
+    ]
+    argv.extend(f"--ignore-pattern={p}" for p in dict.fromkeys(exclude or ()))
+    argv.extend(targets)
+    return argv
+
+
+def knip_argv(target: str) -> list[str]:
+    """Dead-code scan of a project root as one JSON line on stdout.
+
+    Documented-source flags: knip is absent in this env, so re-verify
+    read-only via ``knip --help`` when present before changing them —
+    ``knip --reporter json --directory <target>`` per knip.dev reporters page
+    (``json`` prints machine-readable ``{"issues": [...]}``) plus
+    ``cli-arguments.ts`` (``--reporter`` repeatable, ``--directory``/``-D``
+    runs from a different directory so the spawn stays inside
+    :func:`run_scanner_json` with no cwd support needed).
+    """
+    return [KNIP_ENGINE, "--reporter", "json", "--directory", target]
+
+
+def lockfile_lint_argv(lockfile: str, lock_type: str) -> list[str]:
+    """Lockfile-policy scan of one lockfile (text output, exit-coded).
+
+    Documented-source flags (lirantal/lockfile-lint README + ``bin/``
+    source; binary absent, live ``--help`` re-verification owed):
+    ``lockfile-lint --path <lock> --type <npm|yarn> --allowed-hosts npm
+    --validate-https``. ``--validate-https`` enforces https-only (which
+    implies the valid-scheme check: only ``https:`` passes); ``--allowed-hosts
+    npm`` is the npm-registry alias (matches ``registry.npmjs.org``). The
+    ``--allowed-schemes`` alternative is mutually exclusive with
+    ``--validate-https`` per the README, so it is documented here, not wired.
+    """
+    return [
+        LOCKFILE_LINT_ENGINE,
+        "--path",
+        lockfile,
+        "--type",
+        lock_type,
+        "--allowed-hosts",
+        "npm",
+        "--validate-https",
+    ]
+
+
+def npm_audit_argv(target: str) -> list[str]:
+    """Vuln scan of a project root as JSON (no new binary).
+
+    ``npm audit --json --prefix <target>`` per the npm docs (``--json`` emits
+    the audit report; ``--prefix`` scopes the spawn to the target without cwd
+    support in :func:`run_scanner_json`). ``npm`` ships with node, so the lane
+    needs no installer entry — documented choice, same convention as the
+    ``uv``-hosted checkov lane needing only its host binary.
+    """
+    return [NPM_ENGINE, "audit", "--json", "--prefix", target]
+
+
+def _knip_manifests(target: Path) -> list[Path]:
+    """Knip scan manifests: ``package.json`` (no manifest, no run).
+
+    A single ``package.json`` file target counts for itself. Dir walk is
+    bounded, skips symlinks, never inside ``.git``; sorted for determinism.
+    """
+    if target.is_file():
+        return [target] if target.name == "package.json" else []
+    try:
+        entries = sorted(p for p in target.rglob("*") if ".git" not in p.parts)
+    except OSError:
+        return []
+    return [
+        p
+        for p in entries[:GUARDDOG_MAX_WALK_FILES]
+        if p.is_file() and not p.is_symlink() and p.name == "package.json"
+    ]
+
+
+def _js_lockfiles(target: Path) -> list[tuple[Path, str]]:
+    """``(lockfile, type)`` pairs: npm/yarn/pnpm detection (spec: which one).
+
+    ``package-lock.json`` -> ``npm``, ``yarn.lock`` -> ``yarn``,
+    ``pnpm-lock.yaml`` -> ``pnpm`` (detected but unsupported by lockfile-lint
+    per its README — the runner skips pnpm with
+    :data:`LOCKFILE_LINT_PNPM_REASON`). A single lockfile target counts for
+    its own kind. Bounded walk, no symlinks, never ``.git``; sorted.
+    """
+    if target.is_file():
+        mapping = {
+            "package-lock.json": "npm",
+            "yarn.lock": "yarn",
+            "pnpm-lock.yaml": "pnpm",
+        }
+        lock_type = mapping.get(target.name)
+        return [(target, lock_type)] if lock_type else []
+    try:
+        entries = sorted(p for p in target.rglob("*") if ".git" not in p.parts)
+    except OSError:
+        return []
+    locks: list[tuple[Path, str]] = []
+    for path in entries[:GUARDDOG_MAX_WALK_FILES]:
+        if not path.is_file() or path.is_symlink():
+            continue
+        if path.name == "package-lock.json":
+            locks.append((path, "npm"))
+        elif path.name == "yarn.lock":
+            locks.append((path, "yarn"))
+        elif path.name == "pnpm-lock.yaml":
+            locks.append((path, "pnpm"))
+    return locks
+
+
+def _npm_audit_manifests(target: Path) -> list[Path]:
+    """npm audit manifests: ``package.json`` (lockfile used when present).
+
+    Same walk discipline as :func:`_knip_manifests` (separate helper so the
+    two lanes keep independent skip reasons and never share a branch).
+    """
+    return _knip_manifests(target)
+
+
 async def _run_ruff(
     files: list[str | Path] | tuple[str | Path, ...], timeout: float
 ) -> tuple[str, Any]:
@@ -1346,6 +1541,99 @@ async def _run_supply(target: Path, exclude: tuple[str, ...] = ()) -> tuple[str,
     findings. Synchronous by design (single bounded walk, no subprocess).
     """
     return "supply", scan_supply(target, exclude)
+
+
+async def _run_eslint(
+    files: list[str | Path] | tuple[str | Path, ...] | str | Path,
+    timeout: float,
+    exclude: tuple[str, ...] = (),
+) -> tuple[str, Any]:
+    """Specialist lint lane; empty file list returns ok/empty with no spawn."""
+    targets = [files] if isinstance(files, (str, Path)) else list(files)
+    if not targets:
+        return "eslint", []
+    payload = await run_scanner_json(
+        eslint_argv(targets, exclude), input_data=None, timeout=timeout
+    )
+    return "eslint", payload
+
+
+async def _run_knip(target: str, timeout: float) -> tuple[str, Any]:
+    """Dead-code lane over a project root (callers gate on _knip_manifests)."""
+    payload = await run_scanner_json(
+        knip_argv(target), input_data=None, timeout=timeout
+    )
+    return "knip", payload
+
+
+async def _run_lockfile_lint(lockfile: str, lock_type: str, timeout: float) -> tuple[str, Any]:
+    """Lockfile-policy lane over one lockfile (stdout+stderr merged).
+
+    The real binary reports validator failures via ``console.error`` (stderr),
+    so stdout alone is empty on failure — this runner merges both streams
+    into ``{"lockfile", "output"}`` for :func:`normalize_lockfile_lint`.
+    Non-zero exits are normal when policy fails, so the payload wins
+    regardless of return code (same tolerance as oxlint/vulture).
+    """
+    argv = lockfile_lint_argv(lockfile, lock_type)
+    if not argv:
+        raise OrchestratorError("empty scanner argv")
+    binary = argv[0]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        raise ScannerMissingError(binary) from None
+    except OSError:
+        raise OrchestratorError(f"scanner failed to start: {binary}") from None
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(None), timeout)
+    except TimeoutError:
+        _kill_tree(proc)
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        with contextlib.suppress(ProcessLookupError, OSError, TimeoutError):
+            await asyncio.wait_for(proc.wait(), 2)
+        raise ScannerTimeoutError(binary) from None
+    combined = (
+        stdout.decode("utf-8", errors="replace")
+        + "\n"
+        + stderr.decode("utf-8", errors="replace")
+    ).strip()
+    return "lockfile-lint", {"lockfile": lockfile, "output": combined}
+
+
+async def _run_lockfile_lints(target: str, timeout: float) -> tuple[str, Any]:
+    """Policy lane over every supported lockfile under ``target``.
+
+    One spawn per lockfile (npm/yarn only; pnpm filtered by the caller),
+    sharing the lane budget; outputs merge into ``{"results": [{"lockfile",
+    "output"}]}`` for :func:`normalize_lockfile_lint` (same envelope shape
+    as the guarddog lane). No supported lockfiles returns ok/empty with no
+    spawn (the scan_repo gate normally skips first; defense-in-depth floor).
+    """
+    locks = [(p, t) for p, t in _js_lockfiles(Path(target)) if t in ("npm", "yarn")]
+    if not locks:
+        return "lockfile-lint", {"results": []}
+    per_lock = timeout / len(locks)
+    results = []
+    for path, lock_type in locks:
+        _, payload = await _run_lockfile_lint(str(path), lock_type, per_lock)
+        results.append(payload)
+    return "lockfile-lint", {"results": results}
+
+
+async def _run_npm_audit(target: str, timeout: float) -> tuple[str, Any]:
+    """Vuln lane over a project root (callers gate on _npm_audit_manifests)."""
+    payload = await run_scanner_json(
+        npm_audit_argv(target), input_data=None, timeout=timeout
+    )
+    return "npm-audit", payload
 
 
 def _ignore_scanner_stdout(_text: str) -> dict[str, Any]:
@@ -1477,6 +1765,10 @@ async def _run_trufflehog(target: str, timeout: float) -> tuple[str, Any]:
 # T5: guarddog joins via LANE_GATES manifest-gated on python + javascript
 # manifest groups (pypi side needs requirements manifests, npm side needs
 # package.json); win32 and missing-binary report skipped+reason, never errors.
+# T7: eslint (suffix javascript) + knip / lockfile-lint / npm-audit (manifest
+# javascript) join via LANE_GATES; the manifest trio adds a precise second
+# check (package.json / lockfile) like deptry. oxlint keeps its repo path
+# unchanged (spawn-and-error); the diff path adds a missing pre-check.
 # The trufflehog verify lane intentionally bypasses LANE_GATES: secrets are
 # language-agnostic (no suffix gate applies) and the lane is opt-in network
 # verification, so it is wired separately via verify_secrets (never silent:
@@ -1492,6 +1784,10 @@ _REPO_GATED_LANES: tuple[str, ...] = (
     "ruff",
     "vulture",
     "deptry",
+    "eslint",
+    "knip",
+    "lockfile-lint",
+    "npm-audit",
 )
 
 
@@ -1507,6 +1803,10 @@ _NORMALIZERS = {
     "ruff": normalize_ruff,
     "vulture": normalize_vulture,
     "deptry": normalize_deptry,
+    "eslint": normalize_eslint,
+    "knip": normalize_knip,
+    "lockfile-lint": normalize_lockfile_lint,
+    "npm-audit": normalize_npm_audit,
     "syft": normalize_syft,
     "trufflehog": normalize_trufflehog,
 }
@@ -1784,10 +2084,14 @@ async def scan_diff(
     lanes). The ruff + vulture lanes run over the materialized python files
     (missing binaries report skipped+reason, never an error); deptry always
     reports skipped+reason here (a materialized workdir is not a project
-    root with manifests). Semgrep scans per language group via
-    :func:`_scan_sast_by_language` (python: ``rules/python`` +
-    ``rules/supply-chain``; javascript: ``rules/frontend``; other: joint
-    ``rules/``); empty groups are never invoked.
+    root with manifests). T7: oxlint + eslint run over the materialized
+    javascript files (same per-language groups T1 built; suffix-gated;
+    missing binaries report skipped+reason, never an error); knip +
+    lockfile-lint + npm-audit always report skipped+reason here (they need a
+    project root with manifests — same rationale as deptry). Semgrep scans
+    per language group via :func:`_scan_sast_by_language` (python:
+    ``rules/python`` + ``rules/supply-chain``; javascript: ``rules/frontend``;
+    other: joint ``rules/``); empty groups are never invoked.
     """
     if not diff or not diff.strip():
         return {"status": "empty-diff", "findings": []}
@@ -1808,16 +2112,26 @@ async def scan_diff(
         # T1 routing: the workdir corpus carries diff suffixes (never
         # markers), so this detection is census-only.
         detection = detect_languages(workdir)
-        py_files = _sast_targets_by_language(files)["python"]
+        grouped = _sast_targets_by_language(files)
+        py_files = grouped["python"]
+        js_files = grouped["javascript"]
         skipped: dict[str, str] = {}
         # T6: deptry needs a project root with manifests — a materialized
         # diff workdir is not a project (same rationale as guarddog/supply
         # staying out of scan_diff), so it always reports skipped+reason here.
         skipped["deptry"] = DEPTRY_DIFF_REASON
+        # T7: knip + lockfile-lint + npm-audit need a project root with
+        # manifests (package.json / lockfiles) — same rationale as deptry.
+        skipped["knip"] = f"knip {JS_MANIFEST_DIFF_REASON}"
+        skipped["lockfile-lint"] = f"lockfile-lint {JS_MANIFEST_DIFF_REASON}"
+        skipped["npm-audit"] = f"npm audit {JS_MANIFEST_DIFF_REASON}"
         if not py_files:
             skipped["bandit"] = "no python files in diff"
             skipped["ruff"] = "no python files in diff"
             skipped["vulture"] = "no python files in diff"
+        if not js_files:
+            skipped["oxlint"] = "no javascript files in diff"
+            skipped["eslint"] = "no javascript files in diff"
         # Single path-mode for both engines: files already exist, so the
         # workdir scan adds zero IO; gitleaks v8 rejects `--source -` (stdin FTL).
         secrets_job = (
@@ -1842,6 +2156,21 @@ async def scan_diff(
                 skipped["vulture"] = VULTURE_MISSING_REASON
             else:
                 jobs.append(("vulture", _run_vulture(py_files, budget)))
+        if js_files:
+            # T7: oxlint runs the existing lane over the materialized workdir
+            # (it lints .js/.ts files, ignores .py); eslint runs over the
+            # explicit js file list. Both pre-check missing binaries like
+            # the repo mode (skipped+reason, never an error). The repo oxlint
+            # path is unchanged (spawn-and-error); only the diff path gains
+            # the pre-check.
+            if shutil.which(OXLINT_ENGINE) is None:
+                skipped["oxlint"] = OXLINT_MISSING_REASON
+            else:
+                jobs.append(("oxlint", _run_oxlint(str(workdir), budget, excludes)))
+            if shutil.which(ESLINT_ENGINE) is None:
+                skipped["eslint"] = ESLINT_MISSING_REASON
+            else:
+                jobs.append(("eslint", _run_eslint(js_files, budget)))
         result = await _collect(jobs)
         result["languages"] = detection
         if skipped:
@@ -1911,7 +2240,12 @@ async def scan_repo(
     sees trivy + grype together. The T6 python depth lanes join the fan-out
     last (ruff + vulture over enumerated python files, deptry over the
     project root): missing binaries and missing deptry manifests report
-    ``skipped`` + reason (never an error, never an attempted spawn).
+    ``skipped`` + reason (never an error, never an attempted spawn). The T7
+    JS depth lanes join after them (eslint over enumerated js files, knip +
+    npm-audit over the project root, lockfile-lint per lockfile): missing
+    binaries and missing manifests report ``skipped`` + reason (never an
+    error, never an attempted spawn); pnpm-only trees report the documented
+    unsupported-type skip.
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -2007,6 +2341,43 @@ async def scan_repo(
                 skipped["deptry"] = DEPTRY_NO_MANIFEST_REASON
             else:
                 jobs.append(("deptry", _run_deptry(str(target), budget, excludes)))
+        # T7: JS depth lanes (suffix-gated eslint, manifest-gated knip /
+        # lockfile-lint / npm-audit). Appended after the T6 lanes so
+        # mixed-lane findings order is unchanged. oxlint keeps its repo path
+        # unchanged (spawn-and-error, no pre-check — spec: no behavior change).
+        if "eslint" not in skipped:
+            if shutil.which(ESLINT_ENGINE) is None:
+                skipped["eslint"] = ESLINT_MISSING_REASON
+            else:
+                jobs.append(
+                    ("eslint", _run_eslint(_js_files(target, excludes), budget, excludes))
+                )
+        if "knip" not in skipped:
+            if shutil.which(KNIP_ENGINE) is None:
+                skipped["knip"] = KNIP_MISSING_REASON
+            elif not _knip_manifests(target):
+                skipped["knip"] = KNIP_NO_MANIFEST_REASON
+            else:
+                jobs.append(("knip", _run_knip(str(target), budget)))
+        if "lockfile-lint" not in skipped:
+            if shutil.which(LOCKFILE_LINT_ENGINE) is None:
+                skipped["lockfile-lint"] = LOCKFILE_LINT_MISSING_REASON
+            else:
+                locks = _js_lockfiles(target)
+                supported = [(p, t) for p, t in locks if t in ("npm", "yarn")]
+                if not locks:
+                    skipped["lockfile-lint"] = LOCKFILE_LINT_NO_LOCKFILE_REASON
+                elif not supported:
+                    skipped["lockfile-lint"] = LOCKFILE_LINT_PNPM_REASON
+                else:
+                    jobs.append(("lockfile-lint", _run_lockfile_lints(str(target), budget)))
+        if "npm-audit" not in skipped:
+            if shutil.which(NPM_ENGINE) is None:
+                skipped["npm-audit"] = NPM_AUDIT_MISSING_REASON
+            elif not _npm_audit_manifests(target):
+                skipped["npm-audit"] = NPM_AUDIT_NO_MANIFEST_REASON
+            else:
+                jobs.append(("npm-audit", _run_npm_audit(str(target), budget)))
         result = await _collect(jobs)
         # T4 second phase: grype matches the stored SBOM (sequential — it
         # needs the syft store path, so it cannot join the fan-out). Its
