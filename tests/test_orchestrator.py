@@ -269,7 +269,9 @@ def test_all_scanners_missing_stays_ok_with_errors(
         shutil,
         "which",
         lambda name: None
-        if Path(str(name)).name in {"ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm"}
+        # T10: conftest pre-checks (policy advisory skips hermetically too).
+        if Path(str(name)).name
+        in {"ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm", "conftest"}
         else real_which(str(name)),
     )
     result = asyncio.run(orchestrator.scan_diff(SEED_DIFF))

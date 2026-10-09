@@ -203,7 +203,8 @@ def _force_py_lanes_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hermetic T6: ruff ships on some dev machines — force the new lanes
     missing so skips (never errors) are deterministic everywhere."""
     real_which = shutil.which
-    _missing = {"ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm"}
+    # T10: conftest pre-checks (policy advisory skips hermetically too).
+    _missing = {"ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm", "conftest"}
 
     def _which(name: str) -> str | None:
         if Path(str(name)).name in _missing:
