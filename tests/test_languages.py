@@ -760,6 +760,11 @@ def test_scan_repo_mixed_findings_identical_to_ungated(
             "checkov": (checkov_fail_payload(), 0),
         },
     )
+    # Hermetic T9: enrichment has its own suite (test_enrich.py); this baseline
+    # regression must not depend on live feeds or a warm on-disk KEV cache.
+    monkeypatch.setattr(
+        orchestrator, "enrich_findings", lambda findings, *args, **kwargs: findings
+    )
     result = asyncio.run(orchestrator.scan_repo(str(FIXTURES / "mixed")))
     expected = normalize_findings(
         normalize_semgrep(semgrep_raw)

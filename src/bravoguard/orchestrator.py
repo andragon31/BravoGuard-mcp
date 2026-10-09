@@ -164,9 +164,11 @@ from bravoguard.cache import (
     FindingCache,
     make_osv_key,
     make_scan_key,
+    resolve_cache_dir,
     resolve_sbom_path,
     scanner_fingerprint,
 )
+from bravoguard.enrich import ENRICH_TIMEOUT_SECONDS, enrich_findings
 from bravoguard.languages import (
     JS_SUFFIXES,
     PYTHON_SUFFIXES,
@@ -200,6 +202,7 @@ from bravoguard.normalizer import (
     normalize_trufflehog,
     normalize_vulture,
     parse_vulture_output,
+    sort_findings,
 )
 from bravoguard.supply import scan_supply
 
@@ -2362,6 +2365,38 @@ def _store_scan_cache(
         )
 
 
+def _apply_enrichment(
+    findings: Any, cache: FindingCache | None, timeout: float = ENRICH_TIMEOUT_SECONDS
+) -> Any:
+    """T9 live CVE enrichment after dedup, before the final risk sort.
+
+    Runs :func:`bravoguard.enrich.enrich_findings` (FIRST EPSS + CISA KEV)
+    over the collected findings and re-sorts so the existing KEV-first /
+    EPSS-desc ordering activates on real values. Best-effort: the feed dir
+    is the scan cache dir (the KEV catalog caches alongside ``cache.db``),
+    and any failure returns the findings unchanged — enrichment never
+    drops findings and never fails a scan.
+    """
+    if not isinstance(findings, list) or not findings:
+        return findings
+    try:
+        explicit = getattr(cache, "_path", None) if cache is not None else None
+        feed_dir = resolve_cache_dir(explicit)
+    except Exception:  # noqa: BLE001 — fall back to the default feed dir
+        try:
+            feed_dir = resolve_cache_dir()
+        except Exception:  # noqa: BLE001 — enrichment is optional; keep findings
+            return findings
+    try:
+        enriched = enrich_findings(findings, feed_dir, timeout=timeout)
+    except Exception:  # noqa: BLE001 — feeds fail open (see enrich_findings)
+        return findings
+    try:
+        return sort_findings(enriched)
+    except Exception:  # noqa: BLE001 — a sort failure must not drop findings
+        return enriched if isinstance(enriched, list) else findings
+
+
 async def _collect(jobs: list[tuple[str, Any]]) -> dict[str, Any]:
     labels = [label for label, _ in jobs]
     results = await asyncio.gather(*[coro for _, coro in jobs], return_exceptions=True)
@@ -2525,6 +2560,11 @@ async def scan_diff(
             else:
                 jobs.append(("hadolint", _run_hadolint(container_files, budget)))
         result = await _collect(jobs)
+        # T9: live CVE enrichment (EPSS + KEV) after the dedup, before the
+        # final risk sort, so real scores drive the KEV-first/EPSS-desc
+        # order; best-effort, and the write-through below caches enriched
+        # findings.
+        result["findings"] = _apply_enrichment(result.get("findings", []), cache)
         result["languages"] = detection
         if skipped:
             result["skipped"] = skipped
@@ -2801,6 +2841,11 @@ async def scan_repo(
                     result["findings"] = normalize_findings(combined)
             else:
                 skipped["grype"] = GRYPE_NO_SBOM_REASON
+        # T9: live CVE enrichment (EPSS + KEV) after the final dedup pass
+        # (grype findings merged above), before the final risk sort, so real
+        # scores drive the KEV-first/EPSS-desc order; best-effort, and the
+        # write-through below caches enriched findings.
+        result["findings"] = _apply_enrichment(result.get("findings", []), cache)
         # T8 dive phase: efficiency recommendations (sequential post phase
         # like grype — recommendations[] is NOT findings, so it bypasses
         # _collect and lands in its own top-level contract section).

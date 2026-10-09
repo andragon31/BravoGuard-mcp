@@ -3,6 +3,8 @@
 import asyncio
 import inspect
 import json
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -146,6 +148,11 @@ def test_osv_lookup_cache_hit_avoids_subprocess(monkeypatch: pytest.MonkeyPatch)
         return FakeProcess(osv_payload, 0)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create)
+    # Hermetic T9: force the OSV HTTP leg down so the seeded binary path is exercised.
+    def _offline(*argv: object, **kwargs: object) -> object:
+        raise urllib.error.URLError("offline")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _offline)
     cache = FindingCache(":memory:")
     try:
         first = asyncio.run(

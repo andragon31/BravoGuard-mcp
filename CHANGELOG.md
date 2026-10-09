@@ -53,6 +53,12 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   (core security rules; plugin/Hooks/Next/a11y/type-aware cut documented), knip dead-code
   (manifest-gated, reporter json), lockfile-lint (lockfile-gated, npm/yarn), npm audit
   (built-in, severity capped HIGH). lockfile-lint pinned (npm 5.0.1). 33 new tests.
+- T9 live enrichment (`feature/bravoguard-py-js-containers`, `src/bravoguard/enrich.py` (new) +
+  `src/bravoguard/osv.py` + `src/bravoguard/orchestrator.py` + `tests/test_enrich.py` +
+  `tests/test_osv.py` + `tests/fixtures/enrich/`): FIRST EPSS batch API + CISA KEV catalog
+  (7-day file cache) joined by CVE post-dedup, pre-sort — KEV-first/EPSS-desc ordering now acts
+  on real values; fail-open (offline -> passthrough, zero CVEs -> zero network). osv_lookup is
+  HTTP-first (api.osv.dev, no auth) with binary fallback preserved. 24 new tests.
 - T8 containers lane (`feature/bravoguard-py-js-containers`, `src/bravoguard/orchestrator.py` +
   `src/bravoguard/normalizer.py` + `src/bravoguard/languages.py` + `src/bravoguard/suggest.py` +
   `src/bravoguard/server.py` + `tools-manifest.json` + `scripts/install.py` +
