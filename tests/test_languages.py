@@ -549,7 +549,11 @@ def test_scan_repo_py_only_skips_oxlint(monkeypatch: pytest.MonkeyPatch) -> None
     result = asyncio.run(orchestrator.scan_repo(str(FIXTURES / "py-only")))
     assert result["status"] == "ok"
     assert result["languages"]["languages"] == ["python"]
-    assert result["skipped"] == {"oxlint": "no javascript files or markers detected"}
+    # T3: trufflehog verify is opt-in, always reported skipped by default.
+    assert result["skipped"] == {
+        "oxlint": "no javascript files or markers detected",
+        "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
+    }
     binaries = spawned_binaries(calls)
     assert "bandit" in binaries
     assert "oxlint" not in binaries
@@ -566,6 +570,7 @@ def test_scan_repo_js_only_skips_bandit_and_supply(
     assert result["skipped"] == {
         "bandit": "no python files or markers detected",
         "supply": "no python manifests detected",
+        "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
     }
     binaries = spawned_binaries(calls)
     assert "oxlint" in binaries
@@ -581,7 +586,7 @@ def test_scan_repo_container_only_skips_code_lanes(
     assert result["status"] == "ok"
     assert result["languages"]["languages"] == ["containers"]
     assert result["languages"]["containers"] is True
-    assert set(result["skipped"]) == {"sast", "bandit", "oxlint", "supply"}
+    assert set(result["skipped"]) == {"sast", "bandit", "oxlint", "supply", "trufflehog"}
     binaries = spawned_binaries(calls)
     assert {"trivy", "checkov"} <= binaries
     assert not ({"semgrep", "bandit", "oxlint"} & binaries)
@@ -590,7 +595,7 @@ def test_scan_repo_container_only_skips_code_lanes(
 def test_scan_repo_mixed_findings_identical_to_ungated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Mixed fixture: no lane is skipped, so findings equal the pre-T1 baseline."""
+    """Mixed fixture: only the opt-in lane is skipped, findings equal the baseline."""
     assert scan_supply(FIXTURES / "mixed", orchestrator.DEFAULT_EXCLUDES) == []
     semgrep_raw = json.loads(semgrep_pickle_payload().decode())
     bandit_raw = json.loads(bandit_pickle_payload().decode())
@@ -618,7 +623,10 @@ def test_scan_repo_mixed_findings_identical_to_ungated(
         + normalize_checkov(checkov_raw)
     )
     assert result["findings"] == expected
-    assert "skipped" not in result
+    # T3: trufflehog verify is opt-in, reported skipped even on mixed fixtures.
+    assert result["skipped"] == {
+        "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True"
+    }
     assert result["languages"]["languages"] == ["python", "javascript"]
     assert result["languages"]["typescript"] is True
     assert result["languages"]["census"] == {"python": 1, "javascript": 2}

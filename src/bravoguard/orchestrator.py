@@ -11,6 +11,8 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
   v8 fallback when betterleaks is missing. The fallback adds
   ``--report-path`` capture (this gitleaks build prints only logs to
   stdout); the tmpfile is read once, deleted, and never logged.
+- Secrets verify (opt-in, ``scan_repo`` only): ``trufflehog filesystem --json
+  --results=verified`` over the raw target; ``scan_diff`` stays offline/fast.
 - Frontend: ``oxlint --config .oxlintrc.json <target> --format json`` (M1 + T2
   suspicious category via repo-root config; explicit ``--config`` because default
   discovery is CWD-relative and misses arbitrary targets).
@@ -127,6 +129,7 @@ from bravoguard.normalizer import (
     normalize_semgrep,
     normalize_supply,
     normalize_trivy,
+    normalize_trufflehog,
 )
 from bravoguard.supply import scan_supply
 
@@ -140,6 +143,10 @@ GITLEAKS_FALLBACK = "gitleaks"
 OXLINT_ENGINE = "oxlint"
 TRIVY_ENGINE = "trivy"
 CHECKOV_ENGINE = "checkov"
+TRUFFLEHOG_ENGINE = "trufflehog"
+
+# Opt-in reason for the trufflehog verify lane (surfaced as skipped+reason).
+TRUFFLEHOG_OPT_IN_REASON = "trufflehog verify is opt-in: pass verify_secrets=True"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
@@ -193,6 +200,7 @@ __all__ = [
     "OXLINT_ENGINE",
     "SEMGREP_ENGINE",
     "TRIVY_ENGINE",
+    "TRUFFLEHOG_ENGINE",
     "materialize_base",
     "normalize_bandit",
     "normalize_betterleaks",
@@ -201,6 +209,7 @@ __all__ = [
     "normalize_oxlint",
     "normalize_semgrep",
     "normalize_trivy",
+    "normalize_trufflehog",
     "resolve_secrets_binary",
 ]
 
@@ -981,9 +990,52 @@ async def _run_betterleaks_path(target: str, timeout: float) -> tuple[str, Any]:
     )
 
 
+def trufflehog_argv(target: str) -> list[str]:
+    """Verify-lane argv: verified-only JSON over a filesystem target.
+
+    Flags (``filesystem --json --results=verified``) follow the repo's
+    documented source (server docstring, docs/ARCHITECTURE.md,
+    examples/opencode-mcp.jsonc); the binary is absent in this env, so
+    re-verify read-only via ``trufflehog filesystem --help`` when present
+    before changing them. Verification hits live APIs, so the lane only
+    runs opt-in (``verify_secrets=True``) with the full lane budget.
+    """
+    return [TRUFFLEHOG_ENGINE, "filesystem", "--json", "--results=verified", target]
+
+
+def _parse_trufflehog_stdout(text: str) -> list[dict[str, Any]]:
+    """Parse trufflehog ``--json`` JSONL stdout (one object per line).
+
+    Blank lines are skipped; garbage re-raises ``json.JSONDecodeError`` so
+    the lane records ``failed`` (same honesty as the other lanes).
+    """
+    items = []
+    for line in text.splitlines():
+        if line.strip():
+            entry = json.loads(line)
+            if isinstance(entry, dict):
+                items.append(entry)
+    return items
+
+
+async def _run_trufflehog(target: str, timeout: float) -> tuple[str, Any]:
+    """Verify lane: missing binary degrades to not-installed via run_scanner_json."""
+    payload = await run_scanner_json(
+        trufflehog_argv(target),
+        input_data=None,
+        timeout=timeout,
+        parse=_parse_trufflehog_stdout,
+    )
+    return "trufflehog", payload
+
+
 # scan_repo lanes gated by detect_languages (T1). Secrets, trivy, and
 # checkov are language-agnostic and always run; future manifest-gated
 # lanes (deptry, knip, npm audit, ...) join via LANE_GATES (T2+).
+# The trufflehog verify lane intentionally bypasses LANE_GATES: secrets are
+# language-agnostic (no suffix gate applies) and the lane is opt-in network
+# verification, so it is wired separately via verify_secrets (never silent:
+# opted-out runs report skipped + TRUFFLEHOG_OPT_IN_REASON).
 _REPO_GATED_LANES: tuple[str, ...] = ("sast", "bandit", "oxlint", "supply")
 
 
@@ -995,6 +1047,7 @@ _NORMALIZERS = {
     "trivy": normalize_trivy,
     "checkov": normalize_checkov,
     "supply": normalize_supply,
+    "trufflehog": normalize_trufflehog,
 }
 
 
@@ -1336,6 +1389,7 @@ async def scan_repo(
     cache: FindingCache | None = None,
     cache_ttl: float | None = None,
     exclude: list[str] | tuple[str, ...] | None = None,
+    verify_secrets: bool = False,
 ) -> dict[str, Any]:
     """Deep-scan a repo checkout: validate the path, fan out, collect.
 
@@ -1357,7 +1411,12 @@ async def scan_repo(
     bundled-binary checks) runs in-process and never errors; its walk honors
     ``exclude`` except bare binary-extension globs (``*.exe`` etc.), which
     are lifted for that lane only — they exist to keep engines off binaries,
-    while listing binaries is the lane's purpose.
+    while listing binaries is the lane's purpose. The trufflehog verify lane
+    is opt-in (``verify_secrets=True``): opted-out runs report ``skipped`` +
+    reason (never silent); opted-in runs scan the raw target with the full
+    lane budget (verification does network calls) and map verified live
+    credentials to CRITICAL findings. ``scan_diff`` is untouched by this
+    flag and stays offline/fast.
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -1373,7 +1432,8 @@ async def scan_repo(
     if cache is not None:
         key = make_scan_key(
             f"repo:{target}|{_dir_fingerprint(target, excludes)}"
-            f"\x00exclude:{','.join(sorted(excludes))}",
+            f"\x00exclude:{','.join(sorted(excludes))}"
+            f"\x00verify:{bool(verify_secrets)}",
             scanner_versions=scanner_fingerprint(),
         )
         hit = _lookup_scan_cache(cache, key)
@@ -1385,6 +1445,8 @@ async def scan_repo(
     skipped = {
         lane: reason for lane, reason in lanes_for(detection).items() if lane in _REPO_GATED_LANES
     }
+    if not verify_secrets:
+        skipped["trufflehog"] = TRUFFLEHOG_OPT_IN_REASON
     with tempfile.TemporaryDirectory(prefix="bravoguard-secrets-") as stage_tmp:
         staging = Path(stage_tmp)
         staged = _stage_filtered_tree(target, excludes, staging)
@@ -1399,6 +1461,8 @@ async def scan_repo(
         if "bandit" not in skipped:
             jobs.append(("bandit", _run_bandit(str(target), budget, excludes)))
         jobs.append(("betterleaks", secrets_job))
+        if verify_secrets:
+            jobs.append(("trufflehog", _run_trufflehog(str(target), budget)))
         if "oxlint" not in skipped:
             jobs.append(("oxlint", _run_oxlint(str(target), budget, excludes)))
         jobs.append(("trivy", _run_trivy(str(target), budget, excludes)))

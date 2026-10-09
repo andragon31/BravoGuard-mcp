@@ -74,6 +74,7 @@ async def scan_repo(
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     cache_ttl: float | None = None,
     exclude: list[str] | None = None,
+    verify_secrets: bool = False,
 ) -> dict:
     """Scan a local repository checkout and return unified findings.
 
@@ -81,14 +82,22 @@ async def scan_repo(
     + checkov with path validation and per-scanner timeouts, normalized to
     one schema. Cache-first (SQLite write-through keyed on directory
     content digest); guard statuses and fully-degraded results bypass it.
-    `exclude` overrides the default media/binary skip list.
+    `exclude` overrides the default media/binary skip list. `verify_secrets`
+    opts into the trufflehog live-credential verify lane (network calls,
+    verified hits map to CRITICAL); when False the lane reports `skipped`
+    + reason. `scan_diff` is untouched and stays offline/fast.
     """
     if not path.strip():
         return {"status": "empty-path", "findings": []}
     budget = timeout if isinstance(timeout, (int, float)) and timeout > 0 else DEFAULT_TIMEOUT_SECONDS
     return await asyncio.wait_for(
         orchestrator.scan_repo(
-            path, timeout=budget, cache=_scan_cache(), cache_ttl=cache_ttl, exclude=exclude
+            path,
+            timeout=budget,
+            cache=_scan_cache(),
+            cache_ttl=cache_ttl,
+            exclude=exclude,
+            verify_secrets=verify_secrets,
         ),
         timeout=budget,
     )

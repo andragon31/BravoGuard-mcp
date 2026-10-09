@@ -5,6 +5,8 @@ Single source for the finding schema and all scanner parsers:
 - SAST: semgrep / opengrep JSON (identical shape, same parser).
 - Python: bandit JSON.
 - Secrets: betterleaks JSON (Secret/Match values are never read).
+- Secrets verify: trufflehog ``filesystem --json --results=verified`` JSONL
+  (Raw/RawV2 values are never read; verified live credentials -> CRITICAL).
 - Frontend: oxlint ``--format json`` (``diagnostics`` list).
 - Container/IaC/license: trivy ``fs --format json`` (``Results`` list).
 - IaC: checkov ``-o json`` (``results.failed_checks``).
@@ -53,6 +55,10 @@ FINDING_KEYS = (
 )
 
 BETTERLEAKS_FIX_HINT = "Remove the secret, rotate it, and load it from env or a secret manager."
+TRUFFLEHOG_FIX_HINT = (
+    "This credential verified live: revoke it immediately, rotate it, "
+    "audit recent usage, and load the replacement from env or a secret manager."
+)
 SECRETS_DEFAULT_CWE = "CWE-798"
 
 
@@ -203,6 +209,62 @@ def normalize_betterleaks(payload: Any) -> list[dict[str, Any]]:
                 "HIGH",
                 item.get("Description"),
                 BETTERLEAKS_FIX_HINT,
+            )
+        )
+    return findings
+
+
+def _trufflehog_location(item: dict[str, Any]) -> tuple[Any, Any]:
+    """File + line for one trufflehog entry (filesystem scans).
+
+    Only ``SourceMetadata.Data.Filesystem`` and the ``SourceName`` fallback
+    are read; ``Raw``/``RawV2``/``Redacted`` are never touched.
+    """
+    source = item.get("SourceMetadata")
+    data = source.get("Data") if isinstance(source, dict) else None
+    fs = data.get("Filesystem") if isinstance(data, dict) else None
+    if isinstance(fs, dict):
+        return fs.get("file") or item.get("SourceName"), fs.get("line")
+    return item.get("SourceName"), 0
+
+
+def normalize_trufflehog(payload: Any) -> list[dict[str, Any]]:
+    """Map trufflehog ``--json`` entries to the unified finding shape.
+
+    Entry shape (trufflehog v3 ``filesystem``): ``DetectorName`` (e.g.
+    ``Github``), ``DetectorDescription``, ``Verified`` bool, and
+    ``SourceMetadata.Data.Filesystem.{file, line}``. The detector names the
+    rule (``trufflehog-<DetectorName>``); a ``Verified: true`` entry is a
+    live credential and maps to CRITICAL (active compromise signal),
+    anything else to HIGH (same standing as the betterleaks edge). Only
+    detector metadata is propagated; ``Raw``/``RawV2``/``Redacted`` values
+    are never read, so live credentials cannot flow into findings.
+    """
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        results = payload.get("results", [])
+        items = results if isinstance(results, list) else []
+    else:
+        items = []
+    findings = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        detector = str(item.get("DetectorName") or "unknown")
+        verified = item.get("Verified") is True
+        path, line = _trufflehog_location(item)
+        description = item.get("DetectorDescription") or f"{detector} credential detected"
+        findings.append(
+            make_finding(
+                f"trufflehog-{detector}",
+                SECRETS_DEFAULT_CWE,
+                path,
+                line,
+                "CRITICAL" if verified else "HIGH",
+                f"{'Verified live' if verified else 'Unverified'} {detector} credential: "
+                f"{description}",
+                TRUFFLEHOG_FIX_HINT,
             )
         )
     return findings

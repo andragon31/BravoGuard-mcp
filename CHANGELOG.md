@@ -19,6 +19,13 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   (`secret` stays excluded) with license findings (LOW); semgrep/opengrep per-language `--config`
   split (python: rules/python + rules/supply-chain, javascript: rules/frontend) via shared
   `_scan_sast_by_language`. Findings-identical post-split. 16 new tests.
+- T3 trufflehog verify lane (`feature/bravoguard-py-js-containers`,
+  `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` +
+  `src/bravoguard/server.py` + `tests/test_secrets.py` + `tests/fixtures/secrets/`): opt-in
+  `verify_secrets` flag on `scan_repo` (default off, reported skipped + reason; `scan_diff`
+  untouched, edge stays offline); verified live credentials -> CRITICAL (CWE-798), unverified ->
+  HIGH; Raw/RawV2 secret material never enters findings. No installer change (pinned v3.95.x).
+  10 new tests.
 - H1 supply-plus (`feature/bravoguard-supply-plus`, `src/bravoguard/supply.py` +
   `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` +
   `src/bravoguard/suggest.py` + `tests/test_supply_plus.py`): Windows
