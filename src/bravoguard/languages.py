@@ -78,6 +78,10 @@ LANE_GATES: dict[str, dict[str, Any]] = {
     "supply": {"kind": "manifest", "manifests": ("python",)},
     "syft": {"kind": "suffix", "languages": ("python", "javascript", "containers")},
     "grype": {"kind": "suffix", "languages": ("python", "javascript", "containers")},
+    # T5 choice (documented): the guarddog heuristics lane complements the
+    # own typosquat lane (different axis), so it gates on either manifest
+    # group — python manifests feed the pypi side, package.json the npm side.
+    "guarddog": {"kind": "manifest", "manifests": ("python", "javascript")},
 }
 
 # Machine-readable skip reasons, one per gated lane (T2+ adds its own).
@@ -88,6 +92,7 @@ SKIP_REASONS: dict[str, str] = {
     "supply": "no python manifests detected",
     "syft": "no python, javascript, or container signals detected",
     "grype": "no python, javascript, or container signals detected",
+    "guarddog": "no python or npm manifests detected",
 }
 
 

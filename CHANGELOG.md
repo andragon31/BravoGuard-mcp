@@ -32,6 +32,13 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   (generate-once/rescan-many); grype matches local-DB automatically when both binaries are present
   (no opt-in flag, unlike verify lanes); CVE secondary dedup keeps one finding per (CVE, path)
   with richer fix info winning. No installer change (pinned syft 1.51.1 + grype 0.118.0). 26 new tests.
+- T5 guarddog heuristics lane (`feature/bravoguard-py-js-containers`, `src/bravoguard/orchestrator.py` +
+  `src/bravoguard/normalizer.py` + `src/bravoguard/languages.py` + `tests/test_guarddog.py` +
+  `tests/fixtures/guarddog/`): manifest-gated pypi/npm sides (requirements / package.json),
+  win32 skip (nono-py precedent) + missing-binary + no-manifest skip matrix; detector-named rule_ids,
+  MEDIUM default (HIGH on stated high confidence), CWE-1357/506/200 for known-malice detectors.
+  Complements (never duplicates) the own typosquat lane. No installer change (already covered).
+  19 new tests.
 - H1 supply-plus (`feature/bravoguard-supply-plus`, `src/bravoguard/supply.py` +
   `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` +
   `src/bravoguard/suggest.py` + `tests/test_supply_plus.py`): Windows

@@ -12,6 +12,10 @@ Single source for the finding schema and all scanner parsers:
 - IaC: checkov ``-o json`` (``results.failed_checks``).
 - Supply: typosquat + bundled-binary findings pass through
   (:func:`normalize_supply`) — emitted normalized, never an error.
+- Supply heuristics: guarddog ``pypi scan`` / ``npm scan`` JSON
+  (:func:`normalize_guarddog`) — detector-named rules, MEDIUM default
+  (HIGH only on stated high confidence), CWE only for known-malice
+  detectors, empty elsewhere.
 - SBOM: the syft store lane emits no findings (:func:`normalize_syft`
   always returns ``[]``; the stored SBOM feeds grype).
 - Supply vulns: grype ``sbom:... -o json`` matches (:func:`normalize_grype`).
@@ -533,6 +537,159 @@ def normalize_grype(payload: Any) -> list[dict[str, Any]]:
                 hint,
                 _grype_epss(vulnerability, match),
                 _grype_kev(vulnerability, match),
+            )
+        )
+    return findings
+
+
+GUARDDOG_FIX_HINT = (
+    "Review this dependency: verify the exact name and version on the registry, "
+    "remove it if unneeded, else pin to a trusted release and re-scan."
+)
+
+# Normalized-detector-substring -> CWE for known-malice detectors only.
+# Every value is verified via owasp_map.explain_cwe (typosquat -> A03 and
+# bundled binary -> A08 mirror the own supply lane; exfiltration -> CWE-200
+# exposure of sensitive information). Anything else (code-execution,
+# deceptive-author, empty-info, ...) maps to "" — heuristic behavior flags
+# with no single confident CWE stay empty rather than fabricated.
+GUARDDOG_CWE_BY_DETECTOR: dict[str, str] = {
+    "typosquat": "CWE-1357",
+    "bundled-binary": "CWE-506",
+    "exfiltrat": "CWE-200",
+}
+
+
+def _guarddog_detector_name(issue: dict[str, Any]) -> str:
+    """Detector name of one guarddog issue, normalized for rule ids."""
+    detector = issue.get("detector")
+    if isinstance(detector, dict):
+        detector = detector.get("name")
+    for key in ("detector_name", "rule", "check_id", "name"):
+        if detector:
+            break
+        detector = issue.get(key)
+    text = str(detector or "unknown").strip().lower()
+    return text.replace("_", "-").replace(" ", "-") or "unknown"
+
+
+def _guarddog_cwe(detector: str) -> str:
+    """CWE for a normalized detector name, or "" when not known-malice."""
+    for substring, cwe in GUARDDOG_CWE_BY_DETECTOR.items():
+        if substring in detector:
+            return cwe
+    return ""
+
+
+def _guarddog_severity(issue: dict[str, Any]) -> str:
+    """MEDIUM default; HIGH only when the detector states high confidence.
+
+    Guarddog detectors are heuristics without exploit context, so nothing
+    escalates above HIGH (same honesty as the trivy/checkov cap).
+    """
+    confidence = issue.get("confidence", issue.get("certainty", ""))
+    return "HIGH" if str(confidence).strip().lower() == "high" else "MEDIUM"
+
+
+def _guarddog_location(issue: dict[str, Any]) -> tuple[Any, Any]:
+    """File + line of one guarddog issue, else (None, 0) for manifest fallback."""
+    location = issue.get("location")
+    if isinstance(location, dict):
+        return location.get("path"), location.get("line", 0)
+    for key in ("file", "path", "filename"):
+        if issue.get(key) is not None:
+            return issue.get(key), issue.get("line", 0)
+    return None, 0
+
+
+def _guarddog_scan_entries(
+    scan: Any, manifest: str
+) -> Any:
+    """Yield (manifest, package, version, issue) tuples from one scan payload.
+
+    Tolerates the per-dependency dict (``{pkg: {result: {issues}}}`` or
+    ``{pkg: {issues}}``), ``issues``/``findings``/``matches`` lists, and a
+    bare issue list — the binary is absent in this env, so the exact
+    envelope stays tolerant until live re-verification.
+    """
+    if isinstance(scan, list):
+        for item in scan:
+            if isinstance(item, dict):
+                yield manifest, str(
+                    item.get("dependency", item.get("package", ""))
+                ), str(item.get("version", "")), item
+        return
+    if not isinstance(scan, dict):
+        return
+    for key in ("results", "scan_results", "dependencies"):
+        nested = scan.get(key)
+        if isinstance(nested, (dict, list)):
+            yield from _guarddog_scan_entries(nested, manifest)
+            return
+    for key in ("issues", "findings", "matches"):
+        items = scan.get(key)
+        if isinstance(items, list):
+            package = str(scan.get("dependency", scan.get("package", "")))
+            version = str(scan.get("version", ""))
+            for item in items:
+                if isinstance(item, dict):
+                    yield manifest, package, version, item
+            return
+    for package, entry in scan.items():
+        if not isinstance(entry, dict):
+            continue
+        issues = entry.get("issues")
+        if not isinstance(issues, list):
+            result = entry.get("result")
+            issues = result.get("issues") if isinstance(result, dict) else None
+        if not isinstance(issues, list):
+            continue
+        version = str(entry.get("version", ""))
+        for item in issues:
+            if isinstance(item, dict):
+                yield manifest, str(package), version, item
+
+
+def normalize_guarddog(payload: Any) -> list[dict[str, Any]]:
+    """Map guarddog ``pypi/npm`` scan JSON to the unified finding shape.
+
+    Accepts the :func:`bravoguard.orchestrator._run_guarddog` envelope
+    (``{"results": [{"manifest", "ecosystem", "scan"}]}``) or a bare
+    single-scan payload (see :func:`_guarddog_scan_entries`). Rules are
+    detector-named (``guarddog-<detector>``); severity follows
+    :func:`_guarddog_severity`; fix hints carry review/remove/pin guidance.
+    """
+    entries: list[tuple[str, str, str, dict[str, Any]]] = []
+    if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+        results = payload["results"]
+        if all(isinstance(e, dict) and "scan" in e for e in results):
+            for entry in results:
+                entries.extend(
+                    _guarddog_scan_entries(entry.get("scan"), str(entry.get("manifest", "")))
+                )
+        else:
+            entries.extend(_guarddog_scan_entries(results, ""))
+    else:
+        entries.extend(_guarddog_scan_entries(payload, ""))
+    findings = []
+    for manifest, package, version, issue in entries:
+        detector = _guarddog_detector_name(issue)
+        detail = issue.get("message")
+        if not detail:
+            raw = issue.get("detector")
+            detail = raw.get("description") if isinstance(raw, dict) else None
+        detail = detail or issue.get("description") or detector
+        at_version = f" {version}" if version else ""
+        path, line = _guarddog_location(issue)
+        findings.append(
+            make_finding(
+                f"guarddog-{detector}",
+                _guarddog_cwe(detector),
+                path or manifest,
+                line,
+                _guarddog_severity(issue),
+                f"guarddog '{detector}' in {package or manifest}{at_version}: {detail}",
+                GUARDDOG_FIX_HINT,
             )
         )
     return findings

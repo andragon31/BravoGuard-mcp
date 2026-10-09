@@ -1,0 +1,40 @@
+{
+  "reqeusts": {
+    "dependency": "reqeusts",
+    "version": "2.31.0",
+    "result": {
+      "issues": [
+        {
+          "detector": {
+            "name": "typosquatting",
+            "description": "This package may be a typosquat of a popular package"
+          },
+          "message": "Package 'reqeusts' is a possible typosquat of 'requests'",
+          "confidence": "high"
+        },
+        {
+          "detector": {
+            "name": "exfiltrate-sensitive-data",
+            "description": "This package may exfiltrate sensitive data"
+          },
+          "message": "Possible exfiltration of environment variables to a remote server",
+          "confidence": "medium"
+        },
+        {
+          "detector": {
+            "name": "code-execution",
+            "description": "This package may execute code at install time"
+          },
+          "message": "Suspicious code in the install hook of setup.py"
+        }
+      ]
+    }
+  },
+  "requests": {
+    "dependency": "requests",
+    "version": "2.31.0",
+    "result": {
+      "issues": []
+    }
+  }
+}

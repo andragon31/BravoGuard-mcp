@@ -443,7 +443,8 @@ def test_lanes_for_js_only_skips_python_lanes(tmp_path: Path) -> None:
 def test_lanes_for_empty_dir_skips_all_gated(tmp_path: Path) -> None:
     skips = lanes_for(detect_languages(tmp_path))
     # T4: syft/grype gated on any-stack signals; empty dir skips them too.
-    assert set(skips) == {"sast", "bandit", "oxlint", "supply", "syft", "grype"}
+    # T5: guarddog manifest-gated; empty dir skips it too.
+    assert set(skips) == {"sast", "bandit", "oxlint", "supply", "syft", "grype", "guarddog"}
     assert skips["sast"] == "no python or javascript files detected"
     assert skips["supply"] == "no python manifests detected"
 
@@ -552,11 +553,13 @@ def test_scan_repo_py_only_skips_oxlint(monkeypatch: pytest.MonkeyPatch) -> None
     assert result["languages"]["languages"] == ["python"]
     # T3: trufflehog verify is opt-in, always reported skipped by default.
     # T4: syft/grype binaries absent here -> missing-binary skips.
+    # T5: guarddog binary absent here -> missing-binary skip.
     assert result["skipped"] == {
         "oxlint": "no javascript files or markers detected",
         "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
         "syft": "syft not installed: SBOM store skipped",
         "grype": "syft SBOM unavailable: no SBOM to match",
+        "guarddog": "guarddog not installed: heuristics lane skipped",
     }
     binaries = spawned_binaries(calls)
     assert "bandit" in binaries
@@ -577,6 +580,7 @@ def test_scan_repo_js_only_skips_bandit_and_supply(
         "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
         "syft": "syft not installed: SBOM store skipped",
         "grype": "syft SBOM unavailable: no SBOM to match",
+        "guarddog": "guarddog not installed: heuristics lane skipped",
     }
     binaries = spawned_binaries(calls)
     assert "oxlint" in binaries
@@ -592,7 +596,10 @@ def test_scan_repo_container_only_skips_code_lanes(
     assert result["status"] == "ok"
     assert result["languages"]["languages"] == ["containers"]
     assert result["languages"]["containers"] is True
-    assert set(result["skipped"]) == {"sast", "bandit", "oxlint", "supply", "trufflehog", "syft", "grype"}
+    # T5: container-only has no manifests -> guarddog gate skip.
+    assert set(result["skipped"]) == {
+        "sast", "bandit", "oxlint", "supply", "trufflehog", "syft", "grype", "guarddog",
+    }
     binaries = spawned_binaries(calls)
     assert {"trivy", "checkov"} <= binaries
     assert not ({"semgrep", "bandit", "oxlint"} & binaries)
@@ -631,10 +638,12 @@ def test_scan_repo_mixed_findings_identical_to_ungated(
     assert result["findings"] == expected
     # T3: trufflehog verify is opt-in, reported skipped even on mixed fixtures.
     # T4: syft/grype binaries absent here -> missing-binary skips.
+    # T5: guarddog binary absent here -> missing-binary skip.
     assert result["skipped"] == {
         "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
         "syft": "syft not installed: SBOM store skipped",
         "grype": "syft SBOM unavailable: no SBOM to match",
+        "guarddog": "guarddog not installed: heuristics lane skipped",
     }
     assert result["languages"]["languages"] == ["python", "javascript"]
     assert result["languages"]["typescript"] is True

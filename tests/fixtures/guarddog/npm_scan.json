@@ -1,0 +1,33 @@
+{
+  "results": {
+    "event-stream": {
+      "dependency": "event-stream",
+      "version": "3.3.6",
+      "issues": [
+        {
+          "detector": {
+            "name": "npm-exfiltrate-sensitive-data",
+            "description": "This package may exfiltrate sensitive data"
+          },
+          "message": "Credential exfiltration via the flatmap-stream dependency",
+          "confidence": "HIGH"
+        },
+        {
+          "detector": {
+            "name": "npm-bundled-binary",
+            "description": "This package ships a prebuilt binary"
+          },
+          "message": "Bundled prebuilt binary in the package tarball",
+          "confidence": "low"
+        },
+        {
+          "detector": {
+            "name": "npm-empty-information",
+            "description": "This package ships with empty metadata"
+          },
+          "message": "Package ships with an empty README and no repository link"
+        }
+      ]
+    }
+  }
+}

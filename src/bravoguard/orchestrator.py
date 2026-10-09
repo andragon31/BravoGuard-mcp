@@ -26,6 +26,11 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
 - Supply vulns second opinion (T4): ``grype sbom:<store> -o json`` over the
   stored SBOM (local-DB matching, no network calls, so no opt-in flag —
   unlike the trufflehog verify lane).
+- Supply heuristics (T5): ``guarddog pypi scan`` over requirements manifests
+  plus ``guarddog npm scan`` over package.json manifests as JSON (manifest-
+  gated per side; win32 skipped per the cli.py nono-py precedent; complements
+  the own typosquat lane on the heuristics axis). ``scan_diff`` stays
+  untouched (diffs lack dependency context).
 - IaC: ``uv tool run --from checkov checkov -d <target> -o json`` (M1; the
   bare ``checkov`` shim is broken on Windows, ``uv tool run`` is proven).
 
@@ -140,6 +145,7 @@ from bravoguard.normalizer import (
     normalize_checkov,
     normalize_findings,
     normalize_grype,
+    normalize_guarddog,
     normalize_oxlint,
     normalize_semgrep,
     normalize_supply,
@@ -162,6 +168,7 @@ CHECKOV_ENGINE = "checkov"
 TRUFFLEHOG_ENGINE = "trufflehog"
 SYFT_ENGINE = "syft"
 GRYPE_ENGINE = "grype"
+GUARDDOG_ENGINE = "guarddog"
 
 # T4 skip reasons for the SBOM + second-opinion lanes (surfaced as skipped+reason).
 SYFT_MISSING_REASON = "syft not installed: SBOM store skipped"
@@ -171,6 +178,13 @@ SYFT_IDLE_REASON = "grype not installed: SBOM store unused without matcher"
 
 # Opt-in reason for the trufflehog verify lane (surfaced as skipped+reason).
 TRUFFLEHOG_OPT_IN_REASON = "trufflehog verify is opt-in: pass verify_secrets=True"
+
+# T5 skip reasons for the guarddog heuristics lane (surfaced as skipped+reason).
+GUARDDOG_WIN32_REASON = (
+    "guarddog skipped on Windows: nono-py fails to build "
+    "(cli.py precedent; Linux path unaffected)"
+)
+GUARDDOG_MISSING_REASON = "guarddog not installed: heuristics lane skipped"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RULES_DIR = REPO_ROOT / "rules"
@@ -184,6 +198,9 @@ SAST_FILE_EXTENSIONS: tuple[str, ...] = (".py", ".pyi", ".js", ".jsx", ".ts", ".
 # Windows command-line limits bound explicit file-list argv; chunks share the
 # SAST lane budget evenly (per-chunk = budget / chunk count).
 SAST_FILES_PER_SCAN = 100
+# Upper bound on files examined by the guarddog manifest discovery walk
+# (same order as the fingerprint cap; manifest files are few in practice).
+GUARDDOG_MAX_WALK_FILES = 5000
 
 # Default scan exclusions: media/binary dirs and extensions skipped by the
 # fingerprint and the diff materializer (real-project scans exclude them so
@@ -221,6 +238,7 @@ __all__ = [
     "FINDING_KEYS",
     "GITLEAKS_FALLBACK",
     "GRYPE_ENGINE",
+    "GUARDDOG_ENGINE",
     "OPENGREP_FALLBACK",
     "OXLINT_ENGINE",
     "SEMGREP_ENGINE",
@@ -233,6 +251,7 @@ __all__ = [
     "normalize_checkov",
     "normalize_findings",
     "normalize_grype",
+    "normalize_guarddog",
     "normalize_oxlint",
     "normalize_semgrep",
     "normalize_supply",
@@ -995,6 +1014,86 @@ async def _run_grype(sbom_path: str, timeout: float) -> tuple[str, Any]:
     return "grype", payload
 
 
+def guarddog_pypi_argv(manifest: str) -> list[str]:
+    """Heuristics scan of one requirements manifest as JSON.
+
+    Documented-source flags: guarddog is absent in this env, so the
+    ``guarddog pypi scan <requirements> --output-format json`` shape follows
+    the DataDog GuardDog docs — re-verify read-only via
+    ``guarddog pypi scan --help`` when the binary is present before changing
+    them (live re-verification owed). The pypi side scans requirements
+    manifests only: pyproject-only projects contribute no scan target yet
+    (same owed verification), never a guessed argv.
+    """
+    return [GUARDDOG_ENGINE, "pypi", "scan", manifest, "--output-format", "json"]
+
+
+def guarddog_npm_argv(manifest: str) -> list[str]:
+    """Heuristics scan of one package.json manifest as JSON.
+
+    Documented-source flags (same provenance + owed re-verification as
+    :func:`guarddog_pypi_argv`): ``guarddog npm scan <package.json>
+    --output-format json`` per the DataDog GuardDog docs.
+    """
+    return [GUARDDOG_ENGINE, "npm", "scan", manifest, "--output-format", "json"]
+
+
+def _guarddog_manifests(target: Path) -> list[tuple[str, Path]]:
+    """Scan targets for the guarddog lane: ``(ecosystem, manifest)`` pairs.
+
+    The pypi side runs only with requirements manifests, the npm side only
+    with package.json (manifest-gated per side; a side with no manifests
+    contributes nothing and spawns nothing). Bounded walk, no symlinks,
+    never inside ``.git``; sorted for deterministic argv order. A single
+    requirements/package.json file target scans as its own side.
+    """
+    if target.is_file():
+        names = [(target.name, target)]
+    else:
+        try:
+            entries = sorted(p for p in target.rglob("*") if ".git" not in p.parts)
+        except OSError:
+            return []
+        names = [
+            (p.name, p)
+            for p in entries[:GUARDDOG_MAX_WALK_FILES]
+            if p.is_file() and not p.is_symlink()
+        ]
+    manifests: list[tuple[str, Path]] = []
+    for name, path in names:
+        if name.startswith("requirements") and name.endswith(".txt"):
+            manifests.append(("pypi", path))
+        elif name == "package.json":
+            manifests.append(("npm", path))
+    return manifests
+
+
+async def _run_guarddog(target: str, timeout: float) -> tuple[str, Any]:
+    """Heuristics lane: one guarddog scan per manifest, sharing the budget.
+
+    Each manifest spawns once (pypi side via :func:`guarddog_pypi_argv`,
+    npm side via :func:`guarddog_npm_argv`); scans merge into one envelope
+    for :func:`bravoguard.normalizer.normalize_guarddog`. No manifests
+    returns ok/empty with no spawn (the scan_repo gate normally skips first;
+    this is the defense-in-depth floor). ``scan_diff`` never calls this
+    (diffs lack dependency context — same rationale as supply).
+    """
+    manifests = _guarddog_manifests(Path(target))
+    if not manifests:
+        return "guarddog", {"results": []}
+    per_manifest = timeout / len(manifests)
+    scans = []
+    for ecosystem, path in manifests:
+        argv = (
+            guarddog_pypi_argv(str(path))
+            if ecosystem == "pypi"
+            else guarddog_npm_argv(str(path))
+        )
+        payload = await run_scanner_json(argv, input_data=None, timeout=per_manifest)
+        scans.append({"manifest": str(path), "ecosystem": ecosystem, "scan": payload})
+    return "guarddog", {"results": scans}
+
+
 async def _run_supply(target: Path, exclude: tuple[str, ...] = ()) -> tuple[str, Any]:
     """Supply lane: pure-Python typosquat + bundled-binary checks (H1).
 
@@ -1130,11 +1229,22 @@ async def _run_trufflehog(target: str, timeout: float) -> tuple[str, Any]:
 # lanes (deptry, knip, npm audit, ...) join via LANE_GATES (T2+).
 # T4: syft/grype join via LANE_GATES with every-stack gates (any non-empty
 # detection runs them; only an empty detection skips) — see languages.py.
+# T5: guarddog joins via LANE_GATES manifest-gated on python + javascript
+# manifest groups (pypi side needs requirements manifests, npm side needs
+# package.json); win32 and missing-binary report skipped+reason, never errors.
 # The trufflehog verify lane intentionally bypasses LANE_GATES: secrets are
 # language-agnostic (no suffix gate applies) and the lane is opt-in network
 # verification, so it is wired separately via verify_secrets (never silent:
 # opted-out runs report skipped + TRUFFLEHOG_OPT_IN_REASON).
-_REPO_GATED_LANES: tuple[str, ...] = ("sast", "bandit", "oxlint", "supply", "syft", "grype")
+_REPO_GATED_LANES: tuple[str, ...] = (
+    "sast",
+    "bandit",
+    "oxlint",
+    "supply",
+    "syft",
+    "grype",
+    "guarddog",
+)
 
 
 _NORMALIZERS = {
@@ -1145,6 +1255,7 @@ _NORMALIZERS = {
     "trivy": normalize_trivy,
     "checkov": normalize_checkov,
     "supply": normalize_supply,
+    "guarddog": normalize_guarddog,
     "syft": normalize_syft,
     "trufflehog": normalize_trufflehog,
 }
@@ -1520,7 +1631,11 @@ async def scan_repo(
     is local-DB, so no opt-in flag is needed — deliberate contrast with the
     network-calling trufflehog lane, hence no ``server.scan_repo`` flag);
     when either binary is missing both lanes report ``skipped`` + reason
-    (never an error). Grype matches the stored SBOM in a second phase after
+    (never an error). The guarddog heuristics lane runs when python or npm
+    manifests are detected (pypi side per requirements file, npm side per
+    package.json); win32 and missing-binary report ``skipped`` + reason
+    (never an error, never an attempted spawn). Grype matches the stored
+    SBOM in a second phase after
     the fan-out (it needs the syft store path), and its findings merge with
     a final :func:`normalize_findings` pass so the CVE secondary dedup
     sees trivy + grype together.
@@ -1564,6 +1679,14 @@ async def scan_repo(
         elif shutil.which(GRYPE_ENGINE) is None:
             skipped["syft"] = SYFT_IDLE_REASON
             skipped["grype"] = GRYPE_MISSING_REASON
+    # T5: guarddog never attempts win32 (nono-py build failure, cli.py
+    # precedent — platform first, so Windows never even probes the binary)
+    # and degrades to skipped+reason when the binary is missing.
+    if "guarddog" not in skipped:
+        if sys.platform == "win32":
+            skipped["guarddog"] = GUARDDOG_WIN32_REASON
+        elif shutil.which(GUARDDOG_ENGINE) is None:
+            skipped["guarddog"] = GUARDDOG_MISSING_REASON
     with tempfile.TemporaryDirectory(prefix="bravoguard-secrets-") as stage_tmp:
         staging = Path(stage_tmp)
         staged = _stage_filtered_tree(target, excludes, staging)
@@ -1588,6 +1711,8 @@ async def scan_repo(
             jobs.append(("syft", _run_syft(str(target), budget)))
         if "supply" not in skipped:
             jobs.append(("supply", _run_supply(target, excludes)))
+        if "guarddog" not in skipped:
+            jobs.append(("guarddog", _run_guarddog(str(target), budget)))
         result = await _collect(jobs)
         # T4 second phase: grype matches the stored SBOM (sequential — it
         # needs the syft store path, so it cannot join the fan-out). Its

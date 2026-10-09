@@ -40,7 +40,7 @@ Review: native review per work-unit candidate per user-owned RDD switch (inspect
 - [ ] T2 (Fase 0.2): free config — .oxlintrc.json (suspicious warn), trivy +license, semgrep python/frontend split by suffix. Surfaces: .oxlintrc.json (new), src/bravoguard/orchestrator.py, tests/test_lanes.py.
 - [x] T3 (Fase 1.1): TruffleHog verify lane (opt-in) + normalize_trufflehog. DONE commit `76e6530`. Suite 322 passed + 10 skipped, ruff clean. Native review lineage `review-317951556f419b19`: approved + acknowledged. 2 non-blocking advisories: R3-001 (orchestrator.py:1), R3-002 (test_secrets.py:1). T3 conflict note: worker stopped on 4 frozen T1 asserts (opt-out skipped entry); parent updated them inline (same precedent as T1/T2). Capture lesson: hand-transcribed bindings corrupt long hashes — use machine-to-machine passing via codemode (top-level `collectBindings`, NOT under `result`) for all future captures.
 - [ ] T4 (Fase 1.2): Syft SBOM store + Grype lane + CVE secondary dedup. Surfaces: orchestrator.py, normalizer.py, cache.py, tests + fixtures.
-- [ ] T5 (Fase 1.3): GuardDog Linux lane (win32 skip with reason). Surfaces: orchestrator.py, normalizer.py, cli.py, tests.
+- [x] T4 (Fase 1.2): Syft SBOM store + Grype lane + CVE secondary dedup. DONE commit `b75a29d`. Suite 348 passed + 10 skipped, ruff clean. Native review lineage `review-9cd9474f8ac2813a`: approved clean (no advisories) + acknowledged. 5 frozen T1 asserts updated inline by parent (syft/grype skips). Surfaces were: cache.py, languages.py, normalizer.py, orchestrator.py, tests/test_sbom.py (new, 26 tests) + fixtures.
 - [ ] T6 (Fase 2): Python lanes — ruff (no-S), vulture, deptry (manifest-gated), SBOM feed to grype. Surfaces: orchestrator.py, normalizer.py, tests + fixtures.
 - [ ] T7 (Fase 3): JS lanes — oxlint in scan_diff, eslint+security runner+config, knip, lockfile-lint, npm audit (manifest-gated). Surfaces: server.py?, orchestrator.py, normalizer.py, tests + fixtures.
 - [ ] T8 (Fase 4): containers — hadolint + DL->CWE map + fix templates, kics (compose/dockerfile only), dockle/dive opt-in + recommendations[]. Surfaces: orchestrator.py, normalizer.py, suggest.py, tests + fixtures.
@@ -49,7 +49,7 @@ Review: native review per work-unit candidate per user-owned RDD switch (inspect
 
 ## Progress
 - Branch `feature/bravoguard-py-js-containers` from master `21051ce`. Base: 269 passed, 10 skipped.
-- T0 done. T1 done (45c6c0c, review ok). T2 done (a703525, review ok). T3 done (76e6530, review ok lineage review-317951556f419b19). T4 delegated.
+- T0 done. T1 done (45c6c0c, review ok). T2 done (a703525, review ok). T3 done (76e6530, review ok). T4 done (b75a29d, review ok lineage review-9cd9474f8ac2813a, clean). T5 delegated.
 
 ## Verification evidence
 - Per task `<command>: <observed result>`; parent spot-checks one check per delegated task.
