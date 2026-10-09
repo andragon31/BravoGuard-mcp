@@ -1,0 +1,8 @@
+FROM ubuntu:latest
+MAINTAINER bad@example.com
+RUN apt-get update && apt-get install -y curl
+RUN apt-get upgrade -y
+ADD https://example.com/app.tar.gz /app/
+COPY . /app
+CMD service app start
+EXPOSE 80

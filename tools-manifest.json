@@ -15,6 +15,10 @@
     {"name": "eslint", "version": "10.4.0", "role": "frontend specialist (core security rules only; plugin/Hooks/Next/a11y cut per T7)", "source": "npm:eslint"},
     {"name": "knip", "version": "5", "role": "dead code", "source": "npm:knip"},
     {"name": "lockfile-lint", "version": "5.0.1", "role": "lockfile policy (https/hosts/scheme)", "source": "npm:lockfile-lint"},
+    {"name": "hadolint", "version": "v2.15.1", "role": "dockerfile lint", "source": "github:hadolint/hadolint", "provenance": "latest tag verified live via release API 2026-10-09; bare-binary assets"},
+    {"name": "kics", "version": "v2.2.0", "role": "compose/dockerfile misconfig (never tf/k8s)", "source": "github:Checkmarx/kics", "provenance": "latest tag verified live via release API 2026-10-09; v2.2.0 ships NO release assets (v2.1.20 was last with assets), so the installer uses go-install"},
+    {"name": "dockle", "version": "v0.4.15", "role": "image findings (opt-in)", "source": "github:goodwithtech/dockle", "provenance": "latest tag verified live via release API 2026-10-09; no Windows asset exists (linux/macos only)"},
+    {"name": "dive", "version": "v0.13.1", "role": "image efficiency recommendations (opt-in)", "source": "github:wagoodman/dive", "provenance": "latest tag verified live via release API 2026-10-09"},
     {"name": "madge", "version": "8", "role": "circular deps", "source": "npm:madge"},
     {"name": "jscpd", "version": "4", "role": "duplicates", "source": "npm:jscpd"}
   ]

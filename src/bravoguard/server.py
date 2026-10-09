@@ -75,6 +75,7 @@ async def scan_repo(
     cache_ttl: float | None = None,
     exclude: list[str] | None = None,
     verify_secrets: bool = False,
+    container_image: str | None = None,
 ) -> dict:
     """Scan a local repository checkout and return unified findings.
 
@@ -86,6 +87,12 @@ async def scan_repo(
     opts into the trufflehog live-credential verify lane (network calls,
     verified hits map to CRITICAL); when False the lane reports `skipped`
     + reason. `scan_diff` is untouched and stays offline/fast.
+    `container_image` (tar path or image ref, default None) opts into
+    image analysis: dockle CIS findings join `findings` while dive
+    efficiency lands in a top-level `recommendations[]` section
+    (`source/rule_id/message/image` — efficiency is not a vulnerability).
+    When None both lanes report `skipped` + reason; images are NEVER
+    auto-built.
     """
     if not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -98,6 +105,7 @@ async def scan_repo(
             cache_ttl=cache_ttl,
             exclude=exclude,
             verify_secrets=verify_secrets,
+            container_image=container_image,
         ),
         timeout=budget,
     )

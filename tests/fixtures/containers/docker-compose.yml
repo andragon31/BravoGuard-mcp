@@ -1,0 +1,16 @@
+services:
+  web:
+    image: myapp:latest
+    privileged: true
+    ports:
+      - "80:80"
+    environment:
+      DB_PASSWORD: hunter2
+  worker:
+    build: .
+    image: myapp-worker:1.2.3
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M

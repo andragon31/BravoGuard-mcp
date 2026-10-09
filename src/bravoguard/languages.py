@@ -100,6 +100,18 @@ LANE_GATES: dict[str, dict[str, Any]] = {
     "knip": {"kind": "manifest", "manifests": ("javascript",)},
     "lockfile-lint": {"kind": "manifest", "manifests": ("javascript",)},
     "npm-audit": {"kind": "manifest", "manifests": ("javascript",)},
+    # T8 choice (documented): hadolint + kics are suffix-gated on containers
+    # (they read Dockerfiles / compose files, so markers alone never qualify
+    # them — the census counts marker basenames as the containers signal and
+    # the orchestrator adds a precise second check via _container_dockerfiles
+    # / _kics_targets, same two-stage pattern as deptry). dockle + dive are
+    # "image"-gated: the opt-in container_image param (never detection)
+    # lifts them, so lanes_for ALWAYS skips them (safer than running an
+    # image lane with no image — there is nothing honest to analyze).
+    "hadolint": {"kind": "suffix", "languages": ("containers",)},
+    "kics": {"kind": "suffix", "languages": ("containers",)},
+    "dockle": {"kind": "image", "languages": ("containers",)},
+    "dive": {"kind": "image", "languages": ("containers",)},
 }
 
 # Machine-readable skip reasons, one per gated lane (T2+ adds its own).
@@ -118,6 +130,10 @@ SKIP_REASONS: dict[str, str] = {
     "knip": "no javascript manifests detected",
     "lockfile-lint": "no javascript lockfiles detected",
     "npm-audit": "no javascript manifests detected",
+    "hadolint": "no container files or markers detected",
+    "kics": "no compose or dockerfile targets detected",
+    "dockle": "dockle image lane is opt-in: pass container_image=<tar path|image ref>",
+    "dive": "dive image lane is opt-in: pass container_image=<tar path|image ref>",
 }
 
 
@@ -129,6 +145,15 @@ def _is_python_marker(name: str) -> bool:
 def _is_container_marker(name: str) -> bool:
     """True for container marker basenames (incl. ``Dockerfile.*``)."""
     return name in CONTAINER_MARKERS or name.startswith("Dockerfile.")
+
+
+def is_container_filename(name: str) -> bool:
+    """Public wrapper over :func:`_is_container_marker` for lane routing.
+
+    The orchestrator diff materializer preserves these basenames (instead
+    of the default ``.py`` suffix) so Dockerfile diffs route to hadolint.
+    """
+    return _is_container_marker(name)
 
 
 def _candidate_files(target: Path) -> list[Path]:
@@ -200,7 +225,9 @@ def lanes_for(detection: Mapping[str, Any]) -> dict[str, str]:
 
     Interprets :data:`LANE_GATES`: suffix-gated lanes skip when none of
     their languages was detected, manifest-gated lanes skip when none of
-    their manifest groups has markers. Missing keys degrade to "skip"
+    their manifest groups has markers, image-gated lanes (dockle/dive)
+    always skip here (the opt-in param lifts them in the orchestrator).
+    Missing keys degrade to "skip"
     (safer than running a lane with no signal). T2+ lanes only need a
     ``LANE_GATES`` entry plus a :data:`SKIP_REASONS` line to be routed.
     """
@@ -210,7 +237,11 @@ def lanes_for(detection: Mapping[str, Any]) -> dict[str, str]:
         markers = {}
     skips: dict[str, str] = {}
     for lane, gate in LANE_GATES.items():
-        if gate.get("kind") == "manifest":
+        if gate.get("kind") == "image":
+            # Opt-in image lanes: detection never qualifies them (the
+            # container_image param lifts the skip in the orchestrator).
+            skips[lane] = SKIP_REASONS[lane]
+        elif gate.get("kind") == "manifest":
             groups = gate.get("manifests", ())
             if not any(markers.get(group) for group in groups):
                 skips[lane] = SKIP_REASONS[lane]

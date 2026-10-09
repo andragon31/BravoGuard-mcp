@@ -1,0 +1,8 @@
+Using default CI config
+Image Source: docker://myapp:latest
+Fetching image... (attempt 1/1)
+Analyzing image...
+  efficiency: 94.20 %
+  wastedBytes: 15728640 bytes
+  userWastedPercent: 5.80 %
+Result:FAIL

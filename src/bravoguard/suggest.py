@@ -143,6 +143,49 @@ BUNDLED_BINARY_SUGGESTION = (
     "Example: sha256sum tools/app.exe  # compare with the publisher checksum"
 )
 
+# Hadolint container templates (T8): one per DL code in the spec set,
+# following the _CWE_TEMPLATES registry style (named constant + frozenset
+# + _RULE_TEMPLATES union; rule keys are the lowercased hadolint rule ids).
+# DL3015 content follows live hadolint 2.15.1 evidence (--no-install-
+# recommends), not the "upgrade" parenthetical in the task brief.
+DL3002_SUGGESTION = (
+    "Do not leave the last USER as root (CWE-250): create a dedicated "
+    "user and switch to it before CMD so a container escape does not "
+    "hand over root. "
+    "Example: RUN useradd -r appuser\nUSER appuser"
+)
+
+DL3006_SUGGESTION = (
+    "Always tag the image version explicitly: an untagged FROM drifts "
+    "with the registry (CWE-829). "
+    "Example: FROM ubuntu:22.04  # never a bare name"
+)
+
+DL3007_SUGGESTION = (
+    "Replace :latest with a pinned release tag (CWE-829): latest is "
+    "mutable, so builds are not reproducible and can silently change. "
+    "Example: FROM python:3.12-slim-bookworm"
+)
+
+DL3008_SUGGESTION = (
+    "Pin versions in apt-get install (<pkg>=<version>) with "
+    "--no-install-recommends (CWE-829): unpinned installs drift and "
+    "pull extra packages. "
+    "Example: RUN apt-get install -y --no-install-recommends curl=7.81.0"
+)
+
+DL3025_SUGGESTION = (
+    "Use exec-form JSON notation for CMD/ENTRYPOINT (CWE-78): shell form "
+    "runs through /bin/sh -c, which reintroduces shell parsing. "
+    'Example: CMD ["python", "app.py"]'
+)
+
+DL3015_SUGGESTION = (
+    "Add --no-install-recommends to apt-get install: it avoids extra "
+    "packages that widen the image (smaller surface, fewer CVEs). "
+    "Example: RUN apt-get install -y --no-install-recommends curl"
+)
+
 PICKLE_IMPORT_SUGGESTION = (
     "The pickle import flags deserialization capability (CWE-502): keep it "
     "only if no untrusted input reaches pickle.load/loads — prefer json for "
@@ -203,6 +246,14 @@ SUPPLY_RULES = frozenset(
 # unknown rule ids, so existing fallback behavior is unchanged.
 TYPOSQUAT_RULES = frozenset({"bravoguard-supply-typosquat"})
 BUNDLED_BIN_RULES = frozenset({"bravoguard-supply-bundled-binary"})
+# Hadolint rule ids arrive as "hadolint-DL3002" (normalizer namespace);
+# lookup lowercases, so keys are lowercase here.
+HADOLINT_DL3002_RULES = frozenset({"hadolint-dl3002"})
+HADOLINT_DL3006_RULES = frozenset({"hadolint-dl3006"})
+HADOLINT_DL3007_RULES = frozenset({"hadolint-dl3007"})
+HADOLINT_DL3008_RULES = frozenset({"hadolint-dl3008"})
+HADOLINT_DL3025_RULES = frozenset({"hadolint-dl3025"})
+HADOLINT_DL3015_RULES = frozenset({"hadolint-dl3015"})
 
 _RULE_TEMPLATES: dict[str, str] = {
     rule: EVAL_SUGGESTION for rule in EVAL_RULES
@@ -244,6 +295,18 @@ _RULE_TEMPLATES: dict[str, str] = {
     rule: TYPOSQUAT_SUGGESTION for rule in TYPOSQUAT_RULES
 } | {
     rule: BUNDLED_BINARY_SUGGESTION for rule in BUNDLED_BIN_RULES
+} | {
+    rule: DL3002_SUGGESTION for rule in HADOLINT_DL3002_RULES
+} | {
+    rule: DL3006_SUGGESTION for rule in HADOLINT_DL3006_RULES
+} | {
+    rule: DL3007_SUGGESTION for rule in HADOLINT_DL3007_RULES
+} | {
+    rule: DL3008_SUGGESTION for rule in HADOLINT_DL3008_RULES
+} | {
+    rule: DL3025_SUGGESTION for rule in HADOLINT_DL3025_RULES
+} | {
+    rule: DL3015_SUGGESTION for rule in HADOLINT_DL3015_RULES
 }
 
 _CWE_TEMPLATES = {

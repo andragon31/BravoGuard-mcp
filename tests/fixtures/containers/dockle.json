@@ -1,0 +1,1 @@
+{"details": [{"alerts": [], "code": "CIS-DI-0001", "level": "WARN", "title": "Create a user for the container"}, {"alerts": [{"message": "no healthcheck information"}], "code": "CIS-DI-0006", "level": "INFO", "title": "Add HEALTHCHECK instruction to the container image"}], "summary": {"fatal": 0, "info": 1, "pass": 8, "skip": 0, "warn": 1}}

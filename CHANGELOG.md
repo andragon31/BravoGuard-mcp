@@ -53,6 +53,14 @@ Users: watch GitHub Releases — `bravoguard version --check` and `bravoguard up
   (core security rules; plugin/Hooks/Next/a11y/type-aware cut documented), knip dead-code
   (manifest-gated, reporter json), lockfile-lint (lockfile-gated, npm/yarn), npm audit
   (built-in, severity capped HIGH). lockfile-lint pinned (npm 5.0.1). 33 new tests.
+- T8 containers lane (`feature/bravoguard-py-js-containers`, `src/bravoguard/orchestrator.py` +
+  `src/bravoguard/normalizer.py` + `src/bravoguard/languages.py` + `src/bravoguard/suggest.py` +
+  `src/bravoguard/server.py` + `tools-manifest.json` + `scripts/install.py` +
+  `scripts/install_external.py` + `tests/test_containers.py` + `tests/fixtures/containers/`):
+  hadolint (diff+repo, DL->CWE map, HIGH-capped elevation) + 6 DL fix templates, kics restricted
+  to compose/dockerfile (never .tf), dockle findings + dive `recommendations[]` behind
+  `container_image` opt-in (never auto-builds). Pins: hadolint v2.15.1, kics v2.2.0 (go-install leg,
+  zero release assets), dockle v0.4.15, dive v0.13.1 — all live-verified. 43 new tests.
 - H1 supply-plus (`feature/bravoguard-supply-plus`, `src/bravoguard/supply.py` +
   `src/bravoguard/orchestrator.py` + `src/bravoguard/normalizer.py` +
   `src/bravoguard/suggest.py` + `tests/test_supply_plus.py`): Windows

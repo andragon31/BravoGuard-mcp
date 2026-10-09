@@ -34,8 +34,8 @@ MANIFEST = ROOT / "tools-manifest.json"
 INSTALL_TIMEOUT = 300
 
 PYTHON_TOOLS = ["semgrep", "bandit", "guarddog", "pip-audit", "ruff", "deptry", "vulture"]
-CORE_BINARIES = ["osv-scanner", "syft", "trivy", "checkov", "betterleaks", "trufflehog", "oxlint"]
-OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "lockfile-lint", "madge", "jscpd"]
+CORE_BINARIES = ["osv-scanner", "syft", "trivy", "checkov", "betterleaks", "trufflehog", "oxlint", "hadolint", "kics"]
+OPTIONAL_BINARIES = ["opengrep", "grype", "biome", "eslint", "knip", "lockfile-lint", "madge", "jscpd", "dockle", "dive"]
 
 NPM_PKGS = {
     "oxlint": "oxlint",
@@ -62,6 +62,12 @@ GO_MODULES = {
     "grype": "github.com/anchore/grype/cmd/grype",
     "betterleaks": "github.com/gitleaks/betterleaks",
     "trufflehog": "github.com/trufflesecurity/trufflehog",
+    # T8: kics v2.2.0 ships NO release assets (verified live via the
+    # release API: v2.2.0/v2.1.21 asset lists are empty; v2.1.20 was last
+    # with assets) — so the release leg cannot serve the pin and go is
+    # the working leg (module + cmd/console layout verified live at the
+    # v2.2.0 tag).
+    "kics": "github.com/Checkmarx/kics/v2/cmd/console",
 }
 GITLEAKS_V8_MODULE = "github.com/zricethezav/gitleaks/v8"
 BREW_NAMES = {
@@ -81,6 +87,9 @@ RELEASE_REPOS = {
     "syft": "anchore/syft",
     "grype": "anchore/grype",
     "opengrep": "opengrep/opengrep",
+    "hadolint": "hadolint/hadolint",
+    "dockle": "goodwithtech/dockle",
+    "dive": "wagoodman/dive",
 }
 
 # {ver} is the plain version without a leading v; the download tag keeps the
@@ -118,6 +127,33 @@ RELEASE_ASSETS = {
         "linux": "opengrep_manylinux_x86",
         "windows": "opengrep_windows_x86.exe",
         "macos": "opengrep_osx_arm64",
+    },
+    # T8 container legs. Asset names verified LIVE via the GitHub release
+    # API (2026-10-09) against the pinned tags (all four pins are the
+    # current latest):
+    # - hadolint v2.15.1 ships bare binaries (lowercase ``hadolint-linux-``
+    #   names, no version in the name — {ver} is a no-op, opengrep lane).
+    #   macos picks arm64 (current Apple hardware).
+    # - dockle v0.4.15 ships .tar.gz (+ .deb/.rpm/.apk, unused here) but
+    #   NO Windows asset (linux/macos only) — windows falls to the manual
+    #   fallback, never a guessed URL.
+    # - dive v0.13.1 ships .tar.gz (linux/macos) + .zip (windows); macos
+    #   picks arm64.
+    # - kics v2.2.0 ships NO assets at all: deliberately NO matrix entry
+    #   (go-install is the working leg; a release candidate would 404).
+    "hadolint": {
+        "linux": "hadolint-linux-x86_64",
+        "windows": "hadolint-windows-x86_64.exe",
+        "macos": "hadolint-macos-arm64",
+    },
+    "dockle": {
+        "linux": "dockle_{ver}_Linux-64bit.tar.gz",
+        "macos": "dockle_{ver}_macOS-64bit.tar.gz",
+    },
+    "dive": {
+        "linux": "dive_{ver}_linux_amd64.tar.gz",
+        "windows": "dive_{ver}_windows_amd64.zip",
+        "macos": "dive_{ver}_darwin_arm64.tar.gz",
     },
 }
 
@@ -300,7 +336,15 @@ def describe_candidate(candidate: list[str]) -> str:
         repo = RELEASE_REPOS.get(tool, "?")
         if version.endswith(".x"):
             return f"release: {tool} {version} (exact patch resolved at install) from https://github.com/{repo}/releases"
-        asset = release_asset(tool, plat, version)
+        try:
+            asset = release_asset(tool, plat, version)
+        except KeyError:
+            # No asset for this platform (e.g. dockle ships no Windows
+            # build): point at the release page, never a guessed URL.
+            return (
+                f"release: {tool} {version} from https://github.com/{repo}/releases "
+                f"(no {plat} asset; see manual fallback)"
+            )
         return f"release: {tool} {version} from https://github.com/{repo}/releases/download/{release_tag(version)}/{asset}"
     return " ".join(candidate)
 
@@ -425,10 +469,11 @@ def binary_candidates(name: str, entry: dict, plat: str) -> tuple[list[list[str]
         cmds.append(["go", "install", f"{GO_MODULES[name]}@{go_tag(version)}"])
     if name in RELEASE_ASSETS:
         release = release_candidate(name, version, plat)
-        if name in ("trivy", "trufflehog", "opengrep"):
+        if name in ("trivy", "trufflehog", "opengrep", "hadolint", "dockle", "dive"):
             # go builds are known-broken (trivy toolchain pins, trufflehog
-            # replace directives, opengrep malformed test path upstream):
-            # try the pinned release binary first.
+            # replace directives, opengrep malformed test path upstream) or
+            # absent (hadolint is Haskell; dockle/dive have no verified go
+            # module path): try the pinned release binary first.
             cmds.insert(0, release)
         else:
             # syft/grype go builds are proven: the release binary is only a

@@ -316,6 +316,10 @@ def test_scan_diff_empty_after_filter_ok(monkeypatch: pytest.MonkeyPatch) -> Non
         "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
         "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
         "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
+        "hadolint": "no Dockerfiles in diff",
+        "kics": "kics needs whole compose/dockerfile context: scan_diff lacks file context",
+        "dockle": "dockle needs scan_repo with container_image: scan_diff never builds images",
+        "dive": "dive needs scan_repo with container_image: scan_diff never builds images",
     }
 
 

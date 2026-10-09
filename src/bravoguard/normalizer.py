@@ -40,6 +40,19 @@ Single source for the finding schema and all scanner parsers:
 - JS vulns (T7): npm audit ``--json`` (:func:`normalize_npm_audit`) —
   severity pass-through capped at HIGH (mirror trivy policy), fix versions
   in the hint.
+- Containers (T8): hadolint ``--format json`` (:func:`normalize_hadolint`) —
+  ``rule_id`` is ``hadolint-<DLCODE>``, hadolint error -> MEDIUM /
+  warning|info -> LOW with DL3002/DL3004 security-elevated to HIGH max,
+  CWE only for verified codes (see :data:`HADOLINT_CWE_BY_CODE`).
+- Containers (T8): kics ``results.json`` (:func:`normalize_kics`) —
+  ``rule_id`` is ``kics-<query_id>``, severity pass-through capped at HIGH,
+  fix hint from query remediation (docs-URL fallback). Compose/dockerfile
+  targets only (checkov owns Terraform/K8s); never invoked on ``.tf``.
+- Image (T8, opt-in): dockle ``-f json`` (:func:`normalize_dockle`) —
+  CIS checkpoint codes as ``dockle-<code>`` findings, FATAL capped HIGH.
+  dive ``--ci`` (:func:`parse_dive_output` / :func:`dive_recommendations`) —
+  efficiency findings are NOT vulnerabilities, so they become
+  ``recommendations[]`` (``source/rule_id/message/image``), never findings.
 
 Schema (``FINDING_KEYS``): ``rule_id, cwe, path, line, severity, message,
 fix_hint, epss, kev, reachability_note``. ``epss`` is a float in [0, 1] or
@@ -73,6 +86,7 @@ Helpers:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import math
 import re
@@ -629,6 +643,289 @@ def normalize_npm_audit(payload: Any) -> list[dict[str, Any]]:
             )
         )
     return findings
+
+
+# Hadolint DL-code -> CWE for the top security codes. Every value is
+# verified via owasp_map.explain_cwe (same honesty rule as the guarddog
+# pack): DL3006/DL3007/DL3008-family/DL3026 pin integrity -> CWE-829 (A08),
+# DL3020 remote-ADD -> CWE-494 (A08), DL3025 shell-form -> CWE-78 (A05).
+# DL3002 is the spec floor (-> CWE-250) even though explain_cwe reports
+# "unknown" for CWE-250 (no OWASP 2025 category) — recorded here, not
+# fabricated into a category; DL3004 (sudo) shares the privilege class.
+# Anything else maps to "" (no confident CWE, never a guess).
+HADOLINT_CWE_BY_CODE: dict[str, str] = {
+    "DL3002": "CWE-250",
+    "DL3004": "CWE-250",
+    "DL3006": "CWE-829",
+    "DL3007": "CWE-829",
+    "DL3008": "CWE-829",
+    "DL3013": "CWE-829",
+    "DL3016": "CWE-829",
+    "DL3018": "CWE-829",
+    "DL3026": "CWE-829",
+    "DL3028": "CWE-829",
+    "DL3033": "CWE-829",
+    "DL3036": "CWE-829",
+    "DL3038": "CWE-829",
+    "DL3020": "CWE-494",
+    "DL3025": "CWE-78",
+}
+
+# DL3002 (last user root) and its privilege equivalent DL3004 (sudo) are
+# security-elevated: hadolint reports both at warning/info level, but a
+# root-or-sudo container escapes the container user boundary, so they cap
+# at HIGH (never CRITICAL — engine-assigned without exploit context, same
+# honesty as the trivy/checkov cap; verified live: DL3002 fires at
+# "warning" on hadolint 2.15.1, which the base map would drop to LOW).
+HADOLINT_ELEVATED_CODES: frozenset[str] = frozenset({"DL3002", "DL3004"})
+
+HADOLINT_FIX_HINTS: dict[str, str] = {
+    "DL3002": "Add a non-root USER (create it with useradd) and switch to it before CMD.",
+    "DL3004": "Remove sudo: run as the right USER instead of escalating inside the container.",
+    "DL3006": "Pin the image tag explicitly (never an implicit or floating tag).",
+    "DL3007": "Replace :latest with a pinned release tag so builds are reproducible.",
+    "DL3008": "Pin versions in apt-get install (<pkg>=<version>) with --no-install-recommends.",
+    "DL3015": "Add --no-install-recommends to apt-get install to avoid extra packages.",
+    "DL3025": "Use exec-form JSON notation (CMD [\"exe\", \"arg\"]) instead of shell form.",
+    "DL3020": "Use COPY instead of ADD (ADD auto-fetches remote URLs and extracts archives).",
+    "DL3026": "Use only an allowed registry in FROM (pin the registry explicitly).",
+    "DL3009": "Delete the apt lists (/var/lib/apt/lists/*) after installing.",
+    "DL4000": "MAINTAINER is deprecated: use LABEL maintainer=\"...\" instead.",
+}
+
+
+def _hadolint_fix_hint(code: str, message: Any) -> str:
+    """Per-code hint, else a hadolint-wiki docs link (never empty)."""
+    hint = HADOLINT_FIX_HINTS.get(code)
+    if hint:
+        return hint
+    return (
+        f"Address hadolint {code}: {message} "
+        f"(see https://github.com/hadolint/hadolint/wiki/{code})."
+    )
+
+
+def _hadolint_severity(code: str, level: Any) -> str:
+    """Hadolint level map with the security-elevated HIGH cap.
+
+    Base: error -> MEDIUM, warning|info|style -> LOW (lint signal, same
+    policy as oxlint/eslint); DL3002/DL3004 elevate to HIGH max.
+    """
+    if code in HADOLINT_ELEVATED_CODES:
+        return "HIGH"
+    return "MEDIUM" if str(level or "").lower() == "error" else "LOW"
+
+
+def normalize_hadolint(payload: Any) -> list[dict[str, Any]]:
+    """Map hadolint ``--format json`` entries to the unified shape.
+
+    Real shape (hadolint 2.15.1, verified live): a list of ``{"code",
+    "file", "line", "column", "level" (error/warning/info),
+    "message"}``. A clean Dockerfile prints empty stdout (rc 0), which
+    the runner surfaces as ``{}`` — tolerated here as ``[]``. Rules become
+    ``hadolint-<DLCODE>``; severity follows :func:`_hadolint_severity`;
+    ``cwe`` follows :data:`HADOLINT_CWE_BY_CODE` (empty elsewhere).
+    """
+    items = payload if isinstance(payload, list) else []
+    findings = []
+    for item in items:
+        if not isinstance(item, dict) or not item.get("code"):
+            continue
+        code = str(item.get("code"))
+        findings.append(
+            make_finding(
+                f"hadolint-{code}",
+                HADOLINT_CWE_BY_CODE.get(code, ""),
+                item.get("file"),
+                item.get("line", 0),
+                _hadolint_severity(code, item.get("level")),
+                item.get("message"),
+                _hadolint_fix_hint(code, item.get("message")),
+            )
+        )
+    return findings
+
+
+def _kics_severity(value: Any) -> str:
+    """Pass-through capped at HIGH; blank -> MEDIUM, INFO -> LOW."""
+    if str(value or "").strip().upper() == "INFO":
+        return "LOW"
+    return _capped_severity(value)
+
+
+def _kics_fix_hint(query: dict[str, Any]) -> str:
+    """Remediation text wins; docs URL then generic fallback (never empty)."""
+    remediation = str(query.get("remediation") or "").strip()
+    if remediation:
+        return remediation
+    url = str(query.get("query_url") or "").strip()
+    if url:
+        return f"Remediate per the kics query docs: {url}."
+    return "Remediate per the kics query guidance for this platform."
+
+
+def normalize_kics(payload: Any) -> list[dict[str, Any]]:
+    """Map kics ``results.json`` queries to the unified shape.
+
+    Recorded shape (documented source — kics docs ``scan -p <path>
+    -o <out> --report-formats json`` writes ``results.json``; binary
+    absent in this env, live ``--help`` re-verification owed):
+    ``{"queries": [{"query_id", "query_name", "severity",
+    "platform", "description", "query_url", "remediation"?,
+    "files": [{"file_name", "line"}]}]}``. Rules are
+    ``kics-<query_id>``; severity passes through but caps CRITICAL ->
+    HIGH (same policy as trivy/grype); ``cwe`` stays empty (queries carry
+    no CWE); paths are the first flagged file (else empty).
+    """
+    queries = payload.get("queries", []) if isinstance(payload, dict) else []
+    findings = []
+    for query in queries:
+        if not isinstance(query, dict):
+            continue
+        files = query.get("files")
+        first = files[0] if isinstance(files, list) and files else {}
+        first = first if isinstance(first, dict) else {}
+        name = str(query.get("query_name") or "unknown")
+        description = str(query.get("description") or name)
+        findings.append(
+            make_finding(
+                f"kics-{query.get('query_id', 'unknown')}",
+                "",
+                first.get("file_name", ""),
+                first.get("line", 0),
+                _kics_severity(query.get("severity")),
+                f"{name}: {description}",
+                _kics_fix_hint(query),
+            )
+        )
+    return findings
+
+
+def _dockle_severity(value: Any) -> str:
+    """FATAL -> HIGH (cap), WARN -> MEDIUM, INFO/else -> LOW."""
+    level = str(value or "").strip().upper()
+    if level == "FATAL":
+        return "HIGH"
+    if level == "WARN":
+        return "MEDIUM"
+    return "LOW"
+
+
+def normalize_dockle(payload: Any) -> list[dict[str, Any]]:
+    """Map dockle ``-f json`` checkpoints to the unified shape.
+
+    Recorded shape (documented source — dockle README ``-f json``
+    envelope; ``-f/--format (list, json, sarif)`` verified live in
+    ``dockle --help`` 0.4.15; daemon-gated live run owed):
+    ``{"summary": {...}, "details": [{"code" (CIS-DI-NNNN),
+    "title", "level" (FATAL/WARN/INFO), "alerts"}]}``. Rules are
+    ``dockle-<code>``; severity follows :func:`_dockle_severity` (capped
+    at HIGH per the engine-assigned policy); ``cwe`` stays empty
+    (checkpoints carry no CWE); image-scoped findings have no file path.
+    """
+    details = payload.get("details", []) if isinstance(payload, dict) else []
+    findings = []
+    for entry in details:
+        if not isinstance(entry, dict) or not entry.get("code"):
+            continue
+        code = str(entry.get("code"))
+        alerts = entry.get("alerts")
+        detail = ""
+        if isinstance(alerts, list) and alerts:
+            first = alerts[0]
+            detail = str(first.get("message", first) if isinstance(first, dict) else first)
+        title = str(entry.get("title") or code)
+        message = f"{code} {title}" + (f": {detail}" if detail else ".")
+        findings.append(
+            make_finding(
+                f"dockle-{code}",
+                "",
+                "",
+                0,
+                _dockle_severity(entry.get("level")),
+                message,
+                f"Remediate dockle checkpoint {code} ({title}).",
+            )
+        )
+    return findings
+
+
+_DIVE_EFFICIENCY_RE = re.compile(r"efficiency\s*:\s*([\d.]+)\s*%?", re.IGNORECASE)
+_DIVE_WASTED_RE = re.compile(
+    r"(?:wastedBytes|wasted\s+space)\s*:\s*(\d+)", re.IGNORECASE
+)
+_DIVE_RESULT_RE = re.compile(r"result\s*:\s*(pass|fail|skip)\b", re.IGNORECASE)
+
+DIVE_SOURCE = "dive"
+DIVE_EFFICIENCY_RULE = "dive-efficiency"
+DIVE_WASTED_RULE = "dive-wasted-space"
+
+
+def parse_dive_output(text: Any) -> dict[str, Any]:
+    """Parse ``dive --ci`` text to ``{efficiency, wasted_bytes, result}``.
+
+    Tolerant line parser (same contract as :func:`parse_vulture_output`):
+    unparseable input yields ``None`` fields (never an error). Shape per
+    the dive README CI section (``--ci`` verified live in ``dive --help``
+    0.13.1; daemon-gated live run owed): ``efficiency: NN.NN %``,
+    ``wastedBytes: N bytes``, ``Result:PASS|FAIL|SKIP`` lines.
+    """
+    parsed: dict[str, Any] = {"efficiency": None, "wasted_bytes": None, "result": None}
+    if not isinstance(text, str):
+        return parsed
+    match = _DIVE_EFFICIENCY_RE.search(text)
+    if match is not None:
+        with contextlib.suppress(ValueError):
+            parsed["efficiency"] = float(match.group(1))
+    match = _DIVE_WASTED_RE.search(text)
+    if match is not None:
+        with contextlib.suppress(ValueError):
+            parsed["wasted_bytes"] = int(match.group(1))
+    match = _DIVE_RESULT_RE.search(text)
+    if match is not None:
+        parsed["result"] = match.group(1).upper()
+    return parsed
+
+
+def dive_recommendations(payload: Any) -> list[dict[str, Any]]:
+    """Build ``recommendations[]`` entries from a dive ``--ci`` capture.
+
+    Efficiency is NOT a vulnerability, so these are recommendation dicts
+    (``source/rule_id/message/image`` — deliberately NOT the finding
+    schema: no severity, no CWE), kept separate from ``findings[]`` by the
+    orchestrator. An efficiency score always yields an informational entry;
+    wasted bytes > 0 add a waste entry; unparseable output yields ``[]``.
+    """
+    if not isinstance(payload, dict):
+        return []
+    image = str(payload.get("image", ""))
+    parsed = parse_dive_output(payload.get("output", ""))
+    recommendations = []
+    if parsed["efficiency"] is not None:
+        recommendations.append(
+            {
+                "source": DIVE_SOURCE,
+                "rule_id": DIVE_EFFICIENCY_RULE,
+                "message": (
+                    f"Image efficiency is {parsed['efficiency']:.2f}% (dive --ci). "
+                    "Consolidate RUN layers and clean package caches to raise it."
+                ),
+                "image": image,
+            }
+        )
+    if parsed["wasted_bytes"] is not None and parsed["wasted_bytes"] > 0:
+        recommendations.append(
+            {
+                "source": DIVE_SOURCE,
+                "rule_id": DIVE_WASTED_RULE,
+                "message": (
+                    f"Image wastes {parsed['wasted_bytes']} bytes: "
+                    "remove duplicated/unused files across layers to shrink it."
+                ),
+                "image": image,
+            }
+        )
+    return recommendations
 
 
 def _ruff_fix_hint(item: dict[str, Any]) -> str:

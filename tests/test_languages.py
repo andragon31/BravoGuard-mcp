@@ -80,7 +80,8 @@ def _force_py_lanes_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hermetic T6: ruff ships on some dev machines — force the new lanes
     missing so skips (never errors) are deterministic everywhere."""
     real_which = shutil.which
-    _missing = {"ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm"}
+    # T8: hadolint/kics pre-check (dockle/dive opt-in never spawn without container_image).
+    _missing = {"ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm", "oxlint", "hadolint", "kics"}
 
     def _which(name: str) -> str | None:
         if Path(str(name)).name in _missing:
@@ -449,6 +450,10 @@ def test_lanes_for_py_only_skips_js_lanes(tmp_path: Path) -> None:
         "knip": "no javascript manifests detected",
         "lockfile-lint": "no javascript lockfiles detected",
         "npm-audit": "no javascript manifests detected",
+        "hadolint": "no container files or markers detected",
+        "kics": "no compose or dockerfile targets detected",
+        "dockle": "dockle image lane is opt-in: pass container_image=<tar path|image ref>",
+        "dive": "dive image lane is opt-in: pass container_image=<tar path|image ref>",
     }
 
 
@@ -466,6 +471,10 @@ def test_lanes_for_js_only_skips_python_lanes(tmp_path: Path) -> None:
         "ruff": "no python files or markers detected",
         "vulture": "no python files or markers detected",
         "deptry": "no python manifests detected",
+        "hadolint": "no container files or markers detected",
+        "kics": "no compose or dockerfile targets detected",
+        "dockle": "dockle image lane is opt-in: pass container_image=<tar path|image ref>",
+        "dive": "dive image lane is opt-in: pass container_image=<tar path|image ref>",
     }
 
 
@@ -474,13 +483,19 @@ def test_lanes_for_empty_dir_skips_all_gated(tmp_path: Path) -> None:
     # T4: syft/grype gated on any-stack signals; empty dir skips them too.
     # T5: guarddog manifest-gated; empty dir skips it too.
     # T6: ruff/vulture suffix-gated + deptry manifest-gated skip on empty too.
-    assert set(skips) == {"sast", "bandit", "oxlint", "supply", "syft", "grype", "guarddog", "ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm-audit"}
+    assert set(skips) == {"sast", "bandit", "oxlint", "supply", "syft", "grype", "guarddog", "ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm-audit", "hadolint", "kics", "dockle", "dive"}
     assert skips["sast"] == "no python or javascript files detected"
     assert skips["supply"] == "no python manifests detected"
 
 
 def test_lanes_for_mixed_runs_everything() -> None:
-    assert lanes_for(detect_languages(FIXTURES / "mixed")) == {}
+    # T8: mixed has no containers -> hadolint/kics gate-skips + dockle/dive opt-ins.
+    assert lanes_for(detect_languages(FIXTURES / "mixed")) == {
+        "hadolint": "no container files or markers detected",
+        "kics": "no compose or dockerfile targets detected",
+        "dockle": "dockle image lane is opt-in: pass container_image=<tar path|image ref>",
+        "dive": "dive image lane is opt-in: pass container_image=<tar path|image ref>",
+    }
 
 
 def test_sast_targets_partition_hook() -> None:
@@ -514,6 +529,10 @@ def test_scan_diff_py_only_runs_bandit(monkeypatch: pytest.MonkeyPatch) -> None:
         "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
         "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
         "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
+        "hadolint": "no Dockerfiles in diff",
+        "kics": "kics needs whole compose/dockerfile context: scan_diff lacks file context",
+        "dockle": "dockle needs scan_repo with container_image: scan_diff never builds images",
+        "dive": "dive needs scan_repo with container_image: scan_diff never builds images",
     }
     assert result["languages"]["languages"] == ["python"]
     assert "bandit" in spawned_binaries(calls)
@@ -540,6 +559,10 @@ def test_scan_diff_js_only_skips_bandit(monkeypatch: pytest.MonkeyPatch) -> None
         "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
         "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
         "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
+        "hadolint": "no Dockerfiles in diff",
+        "kics": "kics needs whole compose/dockerfile context: scan_diff lacks file context",
+        "dockle": "dockle needs scan_repo with container_image: scan_diff never builds images",
+        "dive": "dive needs scan_repo with container_image: scan_diff never builds images",
     }
     assert "bandit" not in spawned_binaries(calls)
     assert "semgrep" in spawned_binaries(calls)
@@ -568,6 +591,10 @@ def test_scan_diff_mixed_bandit_runs_semgrep_covers_both(
         "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
         "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
         "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
+        "hadolint": "no Dockerfiles in diff",
+        "kics": "kics needs whole compose/dockerfile context: scan_diff lacks file context",
+        "dockle": "dockle needs scan_repo with container_image: scan_diff never builds images",
+        "dive": "dive needs scan_repo with container_image: scan_diff never builds images",
     }
     assert "bandit" in spawned_binaries(calls)
     semgrep_argvs = [a for a in calls if Path(str(a[0])).name == "semgrep"]
@@ -613,6 +640,10 @@ def test_scan_diff_mixed_findings_identical_to_ungated(
         "knip": "knip needs a project root with manifests: scan_diff lacks dependency context",
         "lockfile-lint": "lockfile-lint needs a project root with manifests: scan_diff lacks dependency context",
         "npm-audit": "npm audit needs a project root with manifests: scan_diff lacks dependency context",
+        "hadolint": "no Dockerfiles in diff",
+        "kics": "kics needs whole compose/dockerfile context: scan_diff lacks file context",
+        "dockle": "dockle needs scan_repo with container_image: scan_diff never builds images",
+        "dive": "dive needs scan_repo with container_image: scan_diff never builds images",
     }
 
 
@@ -632,6 +663,10 @@ def test_scan_repo_py_only_skips_oxlint(monkeypatch: pytest.MonkeyPatch) -> None
     # T7: eslint suffix-gated + knip/lockfile/npm manifest-gated on javascript.
     assert result["skipped"] == {
         "oxlint": "no javascript files or markers detected",
+        "hadolint": "no container files or markers detected",
+        "kics": "no compose or dockerfile targets detected",
+        "dockle": "dockle image lane is opt-in: pass container_image=<tar path|image ref>",
+        "dive": "dive image lane is opt-in: pass container_image=<tar path|image ref>",
         "eslint": "no javascript files or markers detected",
         "knip": "no javascript manifests detected",
         "lockfile-lint": "no javascript lockfiles detected",
@@ -660,6 +695,10 @@ def test_scan_repo_js_only_skips_bandit_and_supply(
     # T6: suffix/manifest gates are deterministic (no which involved).
     assert result["skipped"] == {
         "bandit": "no python files or markers detected",
+        "hadolint": "no container files or markers detected",
+        "kics": "no compose or dockerfile targets detected",
+        "dockle": "dockle image lane is opt-in: pass container_image=<tar path|image ref>",
+        "dive": "dive image lane is opt-in: pass container_image=<tar path|image ref>",
         "supply": "no python manifests detected",
         "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
         "syft": "syft not installed: SBOM store skipped",
@@ -692,6 +731,7 @@ def test_scan_repo_container_only_skips_code_lanes(
     assert set(result["skipped"]) == {
         "sast", "bandit", "oxlint", "supply", "trufflehog", "syft", "grype", "guarddog",
         "ruff", "vulture", "deptry", "eslint", "knip", "lockfile-lint", "npm-audit",
+        "hadolint", "kics", "dockle", "dive",
     }
     binaries = spawned_binaries(calls)
     assert {"trivy", "checkov"} <= binaries
@@ -735,6 +775,10 @@ def test_scan_repo_mixed_findings_identical_to_ungated(
     # T6: ruff/vulture/deptry forced missing (hermetic everywhere).
     assert result["skipped"] == {
         "trufflehog": "trufflehog verify is opt-in: pass verify_secrets=True",
+        "hadolint": "no container files or markers detected",
+        "kics": "no compose or dockerfile targets detected",
+        "dockle": "dockle image lane is opt-in: pass container_image=<tar path|image ref>",
+        "dive": "dive image lane is opt-in: pass container_image=<tar path|image ref>",
         "syft": "syft not installed: SBOM store skipped",
         "grype": "syft SBOM unavailable: no SBOM to match",
         "guarddog": "guarddog not installed: heuristics lane skipped",

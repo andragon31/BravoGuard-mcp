@@ -47,6 +47,19 @@ Runs scanner CLIs as subprocesses with enforced timeouts and no shell:
   (manifest-gated on lockfiles; repo only; pnpm detected but unsupported);
   ``npm audit --json --prefix`` over the project root (manifest-gated on
   package.json; repo only; no new binary — npm ships with node).
+- Containers (T8): ``hadolint --format json`` over explicit Dockerfiles
+  (diff + repo; suffix-gated on the containers signal; ``--format`` values
+  verified live in hadolint 2.15.1 ``--help``) plus ``kics scan`` over
+  compose + dockerfile targets only (repo only — diffs lack whole-file
+  context; never on Terraform/K8s, checkov owns those; ``scan -p/-o/
+  --report-formats/--no-progress`` documented source 2.2.0, live
+  re-verification owed) plus opt-in image analysis (``scan_repo`` only,
+  ``container_image=<tar|ref>``; NEVER auto-build): ``dockle -f json``
+  (``--input`` for tars, positional ref otherwise; ``-f/--format`` +
+  ``--input`` verified live in dockle 0.4.15 ``--help``) feeds findings
+  while ``dive --ci`` (``--ci`` + ``--source`` verified live in dive
+  0.13.1 ``--help``; ``--source docker-archive`` for tars) feeds a NEW
+  top-level ``recommendations[]`` (efficiency is not a vulnerability).
 - IaC: ``uv tool run --from checkov checkov -d <target> -o json`` (M1; the
   bare ``checkov`` shim is broken on Windows, ``uv tool run`` is proven).
 
@@ -154,17 +167,27 @@ from bravoguard.cache import (
     resolve_sbom_path,
     scanner_fingerprint,
 )
-from bravoguard.languages import JS_SUFFIXES, PYTHON_SUFFIXES, detect_languages, lanes_for
+from bravoguard.languages import (
+    JS_SUFFIXES,
+    PYTHON_SUFFIXES,
+    detect_languages,
+    is_container_filename,
+    lanes_for,
+)
 from bravoguard.normalizer import (
     FINDING_KEYS,
+    dive_recommendations,
     normalize_bandit,
     normalize_betterleaks,
     normalize_checkov,
     normalize_deptry,
+    normalize_dockle,
     normalize_eslint,
     normalize_findings,
     normalize_grype,
     normalize_guarddog,
+    normalize_hadolint,
+    normalize_kics,
     normalize_knip,
     normalize_lockfile_lint,
     normalize_npm_audit,
@@ -201,6 +224,10 @@ ESLINT_ENGINE = "eslint"
 KNIP_ENGINE = "knip"
 LOCKFILE_LINT_ENGINE = "lockfile-lint"
 NPM_ENGINE = "npm"
+HADOLINT_ENGINE = "hadolint"
+KICS_ENGINE = "kics"
+DOCKLE_ENGINE = "dockle"
+DIVE_ENGINE = "dive"
 
 # T4 skip reasons for the SBOM + second-opinion lanes (surfaced as skipped+reason).
 SYFT_MISSING_REASON = "syft not installed: SBOM store skipped"
@@ -262,6 +289,36 @@ NPM_AUDIT_MISSING_REASON = "npm not installed: audit lane skipped"
 NPM_AUDIT_NO_MANIFEST_REASON = "npm audit manifest-gated: no package.json"
 JS_MANIFEST_DIFF_REASON = (
     "needs a project root with manifests: scan_diff lacks dependency context"
+)
+
+# T8 skip reasons for the containers + image lanes (surfaced as skipped+reason).
+HADOLINT_MISSING_REASON = "hadolint not installed: dockerfile lint lane skipped"
+KICS_MISSING_REASON = "kics not installed: compose/dockerfile lane skipped"
+DOCKLE_MISSING_REASON = "dockle not installed: image-findings lane skipped"
+DIVE_MISSING_REASON = "dive not installed: image-efficiency lane skipped"
+HADOLINT_NO_TARGETS_REASON = (
+    "hadolint needs Dockerfiles: containers detected but no Dockerfiles found"
+)
+KICS_NO_TARGETS_REASON = (
+    "kics needs compose/dockerfile targets: none found (never runs on Terraform/K8s)"
+)
+DOCKLE_NO_IMAGE_REASON = (
+    "dockle image lane is opt-in: pass container_image=<tar path|image ref>; "
+    "never auto-builds"
+)
+DIVE_NO_IMAGE_REASON = (
+    "dive image lane is opt-in: pass container_image=<tar path|image ref>; "
+    "never auto-builds"
+)
+HADOLINT_DIFF_NO_TARGETS_REASON = "no Dockerfiles in diff"
+KICS_DIFF_REASON = (
+    "kics needs whole compose/dockerfile context: scan_diff lacks file context"
+)
+DOCKLE_DIFF_REASON = (
+    "dockle needs scan_repo with container_image: scan_diff never builds images"
+)
+DIVE_DIFF_REASON = (
+    "dive needs scan_repo with container_image: scan_diff never builds images"
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -695,6 +752,10 @@ def _diff_target(line: str) -> str | None:
     name = Path(target).name
     if not name:
         return None
+    if is_container_filename(name):
+        # T8: Dockerfile/Containerfile diffs keep their real names (instead
+        # of the default .py suffix) so they route to hadolint, not SAST.
+        return name
     return name if Path(name).suffix else f"{name}.py"
 
 
@@ -1636,6 +1697,249 @@ async def _run_npm_audit(target: str, timeout: float) -> tuple[str, Any]:
     return "npm-audit", payload
 
 
+def hadolint_argv(
+    files: list[str | Path] | tuple[str | Path, ...],
+) -> list[str]:
+    """Dockerfile lint as JSON over explicit files (diff + repo).
+
+    Flags verified live via ``hadolint --help`` (hadolint 2.15.1):
+    ``[DOCKERFILE...]`` positionals plus ``-f/--format`` with
+    ``[tty | json | checkstyle | ...]`` values. Explicit file argv means
+    excludes are enforced by enumeration (same as the SAST lane) — no
+    ``--exclude`` flag needed. Callers skip empty file lists (no spawn).
+    """
+    return [HADOLINT_ENGINE, "--format", "json", *(str(item) for item in files)]
+
+
+def kics_argv(target_file: str | Path, output_dir: str | Path) -> list[str]:
+    """Misconfig scan of one compose/dockerfile target, JSON report to ``output_dir``.
+
+    Documented-source flags: kics is absent in this env, so re-verify
+    read-only via ``kics --help`` when present before changing them —
+    ``kics scan -p <path> -o <out> --report-formats json --no-progress``
+    per the kics docs (stdout carries progress logs only, so the caller
+    reads ``<out>/results.json`` and ignores stdout — same tmpfile shape
+    as the gitleaks/deptry legs).
+    """
+    return [
+        KICS_ENGINE,
+        "scan",
+        "-p",
+        str(target_file),
+        "-o",
+        str(output_dir),
+        "--report-formats",
+        "json",
+        "--no-progress",
+    ]
+
+
+def dockle_argv(image: str) -> list[str]:
+    """Image-findings scan as JSON over a tar path (``--input``) or ref.
+
+    Flags verified live via ``dockle --help`` (dockle 0.4.15):
+    ``dockle [options] image_name`` with ``--input value`` (tar path
+    instead of image name) and ``--format/-f value (list, json, sarif)``.
+    An existing file path uses ``--input`` (local tar, no daemon pull
+    ambiguity); anything else is passed positionally as the image ref.
+    """
+    if Path(image).is_file():
+        return [DOCKLE_ENGINE, "--input", image, "-f", "json"]
+    return [DOCKLE_ENGINE, "-f", "json", image]
+
+
+def dive_argv(image: str) -> list[str]:
+    """Image-efficiency scan in CI mode over a tar path or ref.
+
+    Flags verified live via ``dive --help`` (dive 0.13.1): ``--ci`` skips
+    the interactive TUI and validates against CI rules; ``--source
+    docker|podman|docker-archive`` selects the fetch backend, so local
+    tars use ``docker-archive`` (no daemon pull ambiguity). Only ``--ci``
+    (analysis) is ever wired — ``dive build`` is never invoked (no builds).
+    """
+    if Path(image).is_file():
+        return [DIVE_ENGINE, "--source", "docker-archive", "--ci", image]
+    return [DIVE_ENGINE, "--ci", image]
+
+
+def _container_dockerfiles(
+    target: Path, excludes: tuple[str, ...]
+) -> list[Path]:
+    """Dockerfile/Containerfile targets under ``target`` for hadolint.
+
+    Basenames matching :func:`bravoguard.languages.is_container_filename`
+    restricted to Dockerfile-family names (``Dockerfile*``,
+    ``Containerfile``) — compose files are NOT hadolint targets.
+    Same enumeration discipline as :func:`_enumerate_sast_files` (bounded,
+    no symlinks, never ``.git``, excludes honored); sorted for
+    deterministic argv order. A single Dockerfile-family file target
+    counts for itself.
+    """
+    if target.is_file():
+        if is_container_filename(target.name) and target.name.startswith(
+            ("Dockerfile", "Containerfile")
+        ):
+            return [target]
+        return []
+    try:
+        entries = sorted(p for p in target.rglob("*") if ".git" not in p.parts)
+    except OSError:
+        return []
+    found = []
+    for path in entries[:GUARDDOG_MAX_WALK_FILES]:
+        if not path.is_file() or path.is_symlink():
+            continue
+        if not path.name.startswith(("Dockerfile", "Containerfile")):
+            continue
+        try:
+            rel = path.relative_to(target).as_posix()
+        except (OSError, ValueError):
+            continue
+        if _is_excluded(rel, excludes):
+            continue
+        found.append(path)
+    return found
+
+
+def _container_compose_files(target: Path) -> list[Path]:
+    """Compose-file targets under ``target`` for kics.
+
+    Only ``docker-compose.yml/yaml`` + ``compose.yml/yaml`` basenames —
+    Terraform (``*.tf``), Kubernetes manifests, and every other yaml are
+    NEVER kics targets (checkov owns those; documented restriction).
+    Same walk discipline as :func:`_container_dockerfiles`; sorted.
+    """
+    wanted = ("docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml")
+    if target.is_file():
+        return [target] if target.name in wanted else []
+    try:
+        entries = sorted(p for p in target.rglob("*") if ".git" not in p.parts)
+    except OSError:
+        return []
+    return [
+        p
+        for p in entries[:GUARDDOG_MAX_WALK_FILES]
+        if p.is_file() and not p.is_symlink() and p.name in wanted
+    ]
+
+
+def _kics_targets(target: Path, excludes: tuple[str, ...]) -> list[Path]:
+    """Every kics target: compose files (what hadolint cannot cover) plus
+    Dockerfiles (second opinion where checkov is thin) — never ``.tf``.
+
+    Union of :func:`_container_compose_files` and
+    :func:`_container_dockerfiles`, sorted for deterministic argv order.
+    The runner re-filters defensively, so a programmatically-passed
+    ``.tf`` path still never spawns (defense in depth, asserted in tests).
+    """
+    seen: dict[str, Path] = {}
+    for path in (*_container_compose_files(target), *_container_dockerfiles(target, excludes)):
+        seen.setdefault(str(path), path)
+    return sorted(seen.values(), key=str)
+
+
+def _is_kics_target(path: str | Path) -> bool:
+    """True only for compose/dockerfile basenames (never ``.tf``)."""
+    name = Path(path).name
+    return name in (
+        "docker-compose.yml",
+        "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
+    ) or name.startswith(("Dockerfile", "Containerfile"))
+
+
+async def _run_hadolint(
+    files: list[str | Path] | tuple[str | Path, ...], timeout: float
+) -> tuple[str, Any]:
+    """Dockerfile lane over explicit files; empty list returns ok/empty."""
+    if not files:
+        return "hadolint", []
+    payload = await run_scanner_json(
+        hadolint_argv(list(files)), input_data=None, timeout=timeout
+    )
+    return "hadolint", payload
+
+
+async def _run_kics(
+    targets: list[str | Path] | tuple[str | Path, ...], timeout: float
+) -> tuple[str, Any]:
+    """Misconfig lane over compose/dockerfile targets (gitleaks pattern).
+
+    One spawn per target sharing the lane budget; each run writes
+    ``results.json`` to a fresh tmpdir (stdout is progress logs, so it is
+    discarded via :func:`_ignore_scanner_stdout` and the report wins).
+    Non-kics basenames (``.tf`` and friends) are filtered here even if a
+    caller passes them — checkov owns those, documented restriction.
+    Empty/filtered lists return ok/empty with no spawn.
+    """
+    wanted = [t for t in targets if _is_kics_target(t)]
+    if not wanted:
+        return "kics", {"queries": []}
+    per_target = timeout / len(wanted)
+    queries = []
+    for item in wanted:
+        with tempfile.TemporaryDirectory(prefix="bravoguard-kics-") as out:
+            await run_scanner_json(
+                kics_argv(str(item), out),
+                input_data=None,
+                timeout=per_target,
+                parse=_ignore_scanner_stdout,
+            )
+            report = _read_json_report(str(Path(out) / "results.json"), KICS_ENGINE)
+        if isinstance(report, dict) and isinstance(report.get("queries"), list):
+            queries.extend(report["queries"])
+    return "kics", {"queries": queries}
+
+
+async def _run_dockle(image: str, timeout: float) -> tuple[str, Any]:
+    """Image-findings lane over a tar path or ref (callers gate on opt-in)."""
+    payload = await run_scanner_json(
+        dockle_argv(image), input_data=None, timeout=timeout
+    )
+    return "dockle", payload
+
+
+async def _run_dive(image: str, timeout: float) -> tuple[str, Any]:
+    """Image-efficiency lane over a tar path or ref (stdout+stderr merged).
+
+    ``dive --ci`` prints progress + the efficiency report across both
+    streams, so both are merged into ``{"image", "output"}`` for
+    :func:`bravoguard.normalizer.dive_recommendations` (same merged-stream
+    shape as the lockfile-lint lane). Non-zero exits are normal when CI
+    rules fail, so the payload wins regardless of return code.
+    """
+    argv = dive_argv(image)
+    binary = argv[0]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    except FileNotFoundError:
+        raise ScannerMissingError(binary) from None
+    except OSError:
+        raise OrchestratorError(f"scanner failed to start: {binary}") from None
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(None), timeout)
+    except TimeoutError:
+        _kill_tree(proc)
+        with contextlib.suppress(ProcessLookupError, OSError):
+            proc.kill()
+        with contextlib.suppress(ProcessLookupError, OSError, TimeoutError):
+            await asyncio.wait_for(proc.wait(), 2)
+        raise ScannerTimeoutError(binary) from None
+    combined = (
+        stdout.decode("utf-8", errors="replace")
+        + "\n"
+        + stderr.decode("utf-8", errors="replace")
+    ).strip()
+    return "dive", {"image": image, "output": combined}
+
+
 def _ignore_scanner_stdout(_text: str) -> dict[str, Any]:
     """Tolerant stdout parse for the gitleaks fallback: stdout carries log
     lines (never findings), so it is discarded — the report file wins."""
@@ -1765,6 +2069,9 @@ async def _run_trufflehog(target: str, timeout: float) -> tuple[str, Any]:
 # T5: guarddog joins via LANE_GATES manifest-gated on python + javascript
 # manifest groups (pypi side needs requirements manifests, npm side needs
 # package.json); win32 and missing-binary report skipped+reason, never errors.
+# T8: hadolint + kics (suffix containers) + dockle / dive (image opt-in)
+# join via LANE_GATES; hadolint adds a Dockerfile second check and kics a
+# compose/dockerfile second check (never .tf — checkov owns those).
 # T7: eslint (suffix javascript) + knip / lockfile-lint / npm-audit (manifest
 # javascript) join via LANE_GATES; the manifest trio adds a precise second
 # check (package.json / lockfile) like deptry. oxlint keeps its repo path
@@ -1788,6 +2095,10 @@ _REPO_GATED_LANES: tuple[str, ...] = (
     "knip",
     "lockfile-lint",
     "npm-audit",
+    "hadolint",
+    "kics",
+    "dockle",
+    "dive",
 )
 
 
@@ -1807,6 +2118,9 @@ _NORMALIZERS = {
     "knip": normalize_knip,
     "lockfile-lint": normalize_lockfile_lint,
     "npm-audit": normalize_npm_audit,
+    "hadolint": normalize_hadolint,
+    "kics": normalize_kics,
+    "dockle": normalize_dockle,
     "syft": normalize_syft,
     "trufflehog": normalize_trufflehog,
 }
@@ -1997,6 +2311,10 @@ def _lookup_scan_cache(cache: FindingCache | None, key: str) -> dict[str, Any] |
             response["languages"] = cached["languages"]
         if cached.get("skipped"):
             response["skipped"] = cached["skipped"]
+        # T8: dive recommendations ride the same envelope (absent on legacy
+        # entries, which predate the image lanes).
+        if cached.get("recommendations") is not None:
+            response["recommendations"] = cached["recommendations"]
         return response
     return {"status": "ok", "findings": cached, "cached": True}  # legacy list payload
 
@@ -2021,18 +2339,25 @@ def _store_scan_cache(
     errors: dict[str, str] | None = None,
     languages: dict[str, Any] | None = None,
     skipped: dict[str, str] | None = None,
+    recommendations: list[dict[str, Any]] | None = None,
 ) -> None:
     if cache is None or not isinstance(findings, list):
         return
     with contextlib.suppress(Exception):
+        payload: dict[str, Any] = {
+            "findings": findings,
+            "errors": errors or {},
+            "languages": languages or {},
+            "skipped": skipped or {},
+        }
+        # T8: recommendations ride the envelope only when the caller
+        # passes them (scan_repo always does, scan_diff never does — so
+        # diff hits never gain the key and the response shape is stable).
+        if recommendations is not None:
+            payload["recommendations"] = recommendations
         cache.put(
             key,
-            {
-                "findings": findings,
-                "errors": errors or {},
-                "languages": languages or {},
-                "skipped": skipped or {},
-            },
+            payload,
             ttl_seconds=cache_ttl,
         )
 
@@ -2091,7 +2416,11 @@ async def scan_diff(
     project root with manifests — same rationale as deptry). Semgrep scans
     per language group via :func:`_scan_sast_by_language` (python:
     ``rules/python`` + ``rules/supply-chain``; javascript: ``rules/frontend``;
-    other: joint ``rules/``); empty groups are never invoked.
+    other: joint ``rules/``); empty groups are never invoked. T8: hadolint
+    runs over materialized Dockerfile/Containerfile files (real names
+    preserved by the materializer; missing binary reports skipped+reason);
+    kics + dockle + dive always report skipped+reason here (kics needs
+    whole-file context, image lanes need scan_repo + container_image).
     """
     if not diff or not diff.strip():
         return {"status": "empty-diff", "findings": []}
@@ -2112,7 +2441,17 @@ async def scan_diff(
         # T1 routing: the workdir corpus carries diff suffixes (never
         # markers), so this detection is census-only.
         detection = detect_languages(workdir)
-        grouped = _sast_targets_by_language(files)
+        # T8: container-named materialized files route to hadolint, not
+        # SAST (a Dockerfile scanned with python rules is noise; bandit
+        # only considers .py files and oxlint only lintable extensions,
+        # so the workdir scans stay clean). Dockerfile-family ONLY:
+        # compose diffs keep their SAST-"other" routing (unchanged) and
+        # kics always skips in diffs (whole-file context rationale).
+        container_files = [
+            f for f in files if f.name.startswith(("Dockerfile", "Containerfile"))
+        ]
+        sast_files = [f for f in files if f not in container_files]
+        grouped = _sast_targets_by_language(sast_files)
         py_files = grouped["python"]
         js_files = grouped["javascript"]
         skipped: dict[str, str] = {}
@@ -2125,6 +2464,14 @@ async def scan_diff(
         skipped["knip"] = f"knip {JS_MANIFEST_DIFF_REASON}"
         skipped["lockfile-lint"] = f"lockfile-lint {JS_MANIFEST_DIFF_REASON}"
         skipped["npm-audit"] = f"npm audit {JS_MANIFEST_DIFF_REASON}"
+        # T8: compose + image lanes always skip in diffs (kics needs
+        # whole-file context; dockle/dive need scan_repo + container_image
+        # — scan_diff has no image param and never builds images).
+        skipped["kics"] = KICS_DIFF_REASON
+        skipped["dockle"] = DOCKLE_DIFF_REASON
+        skipped["dive"] = DIVE_DIFF_REASON
+        if not container_files:
+            skipped["hadolint"] = HADOLINT_DIFF_NO_TARGETS_REASON
         if not py_files:
             skipped["bandit"] = "no python files in diff"
             skipped["ruff"] = "no python files in diff"
@@ -2142,7 +2489,7 @@ async def scan_diff(
         # Semgrep skips gitignored dirs (.bravoguard/tmp); explicit files bypass the skip.
         # Bandit ignores gitignore so it keeps the workdir; repo scans keep dir targets.
         jobs = [
-            ("sast", _scan_sast_by_language(files, budget, excludes)),
+            ("sast", _scan_sast_by_language(sast_files, budget, excludes)),
             ("betterleaks", secrets_job),
         ]
         if py_files:
@@ -2171,6 +2518,12 @@ async def scan_diff(
                 skipped["eslint"] = ESLINT_MISSING_REASON
             else:
                 jobs.append(("eslint", _run_eslint(js_files, budget)))
+        if container_files:
+            # T8: missing-binary pre-check (skipped+reason, never an error).
+            if shutil.which(HADOLINT_ENGINE) is None:
+                skipped["hadolint"] = HADOLINT_MISSING_REASON
+            else:
+                jobs.append(("hadolint", _run_hadolint(container_files, budget)))
         result = await _collect(jobs)
         result["languages"] = detection
         if skipped:
@@ -2199,6 +2552,7 @@ async def scan_repo(
     cache_ttl: float | None = None,
     exclude: list[str] | tuple[str, ...] | None = None,
     verify_secrets: bool = False,
+    container_image: str | None = None,
 ) -> dict[str, Any]:
     """Deep-scan a repo checkout: validate the path, fan out, collect.
 
@@ -2245,7 +2599,16 @@ async def scan_repo(
     npm-audit over the project root, lockfile-lint per lockfile): missing
     binaries and missing manifests report ``skipped`` + reason (never an
     error, never an attempted spawn); pnpm-only trees report the documented
-    unsupported-type skip.
+    unsupported-type skip. The T8 containers lanes join after them (hadolint
+    over enumerated Dockerfiles, kics over compose + Dockerfiles — never
+    Terraform/K8s, checkov owns those): missing binaries and missing
+    targets report ``skipped`` + reason (never an error, never an attempted
+    spawn). ``container_image=<tar path|image ref>`` opts into image
+    analysis (default None = dockle/dive report ``skipped`` + reason;
+    images are NEVER auto-built): dockle CIS findings join ``findings``
+    while dive efficiency lands in a NEW top-level ``recommendations[]``
+    section (``source/rule_id/message/image`` dicts — efficiency is not a
+    vulnerability, so it never enters ``findings``).
     """
     if not path or not path.strip():
         return {"status": "empty-path", "findings": []}
@@ -2262,7 +2625,8 @@ async def scan_repo(
         key = make_scan_key(
             f"repo:{target}|{_dir_fingerprint(target, excludes)}"
             f"\x00exclude:{','.join(sorted(excludes))}"
-            f"\x00verify:{bool(verify_secrets)}",
+            f"\x00verify:{bool(verify_secrets)}"
+            f"\x00image:{container_image or ''}",
             scanner_versions=scanner_fingerprint(),
         )
         hit = _lookup_scan_cache(cache, key)
@@ -2378,6 +2742,44 @@ async def scan_repo(
                 skipped["npm-audit"] = NPM_AUDIT_NO_MANIFEST_REASON
             else:
                 jobs.append(("npm-audit", _run_npm_audit(str(target), budget)))
+        # T8: containers depth (suffix-gated hadolint over Dockerfiles,
+        # suffix-gated kics over compose + Dockerfiles) + opt-in image
+        # analysis (dockle findings join the fan-out; dive builds
+        # recommendations[] in a post phase). Appended after the T7 lanes
+        # so mixed-lane findings order is unchanged.
+        if "hadolint" not in skipped:
+            if shutil.which(HADOLINT_ENGINE) is None:
+                skipped["hadolint"] = HADOLINT_MISSING_REASON
+            else:
+                dockerfiles = _container_dockerfiles(target, excludes)
+                if not dockerfiles:
+                    skipped["hadolint"] = HADOLINT_NO_TARGETS_REASON
+                else:
+                    jobs.append(("hadolint", _run_hadolint(dockerfiles, budget)))
+        if "kics" not in skipped:
+            if shutil.which(KICS_ENGINE) is None:
+                skipped["kics"] = KICS_MISSING_REASON
+            else:
+                kics_targets = _kics_targets(target, excludes)
+                if not kics_targets:
+                    skipped["kics"] = KICS_NO_TARGETS_REASON
+                else:
+                    jobs.append(("kics", _run_kics(kics_targets, budget)))
+        # T8 image lanes: lanes_for always skips the "image" kind — the
+        # opt-in container_image param (never detection) lifts them here.
+        # No param means skipped + reason; images are NEVER auto-built
+        # (no `dive build`, no push/pull — only analysis of the given
+        # tar/ref).
+        if container_image:
+            skipped.pop("dockle", None)
+            skipped.pop("dive", None)
+        if "dockle" not in skipped:
+            if shutil.which(DOCKLE_ENGINE) is None:
+                skipped["dockle"] = DOCKLE_MISSING_REASON
+            else:
+                jobs.append(("dockle", _run_dockle(container_image or "", budget)))
+        if "dive" not in skipped and shutil.which(DIVE_ENGINE) is None:
+            skipped["dive"] = DIVE_MISSING_REASON
         result = await _collect(jobs)
         # T4 second phase: grype matches the stored SBOM (sequential — it
         # needs the syft store path, so it cannot join the fan-out). Its
@@ -2399,6 +2801,22 @@ async def scan_repo(
                     result["findings"] = normalize_findings(combined)
             else:
                 skipped["grype"] = GRYPE_NO_SBOM_REASON
+        # T8 dive phase: efficiency recommendations (sequential post phase
+        # like grype — recommendations[] is NOT findings, so it bypasses
+        # _collect and lands in its own top-level contract section).
+        recommendations: list[dict[str, Any]] = []
+        if "dive" not in skipped and container_image:
+            try:
+                _, dive_payload = await _run_dive(container_image, budget)
+            except ScannerMissingError:
+                result.setdefault("errors", {})["dive"] = "not-installed"
+            except ScannerTimeoutError:
+                result.setdefault("errors", {})["dive"] = "timeout"
+            except OrchestratorError:
+                result.setdefault("errors", {})["dive"] = "failed"
+            else:
+                recommendations = dive_recommendations(dive_payload)
+        result["recommendations"] = recommendations
         if staged:
             for finding in result.get("findings", []):
                 if isinstance(finding, dict) and finding.get("path"):
@@ -2417,6 +2835,7 @@ async def scan_repo(
             result.get("errors"),
             languages=detection,
             skipped=skipped or None,
+            recommendations=result.get("recommendations"),
         )
     return result
 
